@@ -175,6 +175,7 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self._data: Dict[str, Checkpoint] = {}
+        self._approvals: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
@@ -196,6 +197,22 @@ class MemoryStore:
                 return True
             return False
 
+    # -- approvals (write-through storage for ApprovalQueue) --
+
+    def save_approval(self, req: Any) -> None:
+        with self._lock:
+            self._approvals[req.approval_id] = req.to_storage_dict()
+
+    def load_approvals(self) -> List[Any]:
+        from .approval import ApprovalRequest
+
+        with self._lock:
+            return [ApprovalRequest.from_dict(d) for d in self._approvals.values()]
+
+    def delete_approval(self, approval_id: str) -> bool:
+        with self._lock:
+            return self._approvals.pop(approval_id, None) is not None
+
 
 # ---------------------------------------------------------------------------
 # SqliteStore — stdlib sqlite3, production default
@@ -216,6 +233,20 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     timestamp    TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT '',
     audit_log    TEXT NOT NULL DEFAULT '[]'
+)"""
+
+_CREATE_APPROVALS_TABLE = """\
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id  TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    tool_name    TEXT NOT NULL,
+    tool_args    TEXT NOT NULL DEFAULT '{}',
+    status       TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT '',
+    resolved_at  TEXT NOT NULL DEFAULT '',
+    resolved_by  TEXT NOT NULL DEFAULT '',
+    deny_reason  TEXT NOT NULL DEFAULT '',
+    expires_at   TEXT NOT NULL DEFAULT ''
 )"""
 
 # Migration: add columns if upgrading from Phase 1 schema
@@ -247,6 +278,7 @@ class SqliteStore:
 
         with self._connect() as conn:
             conn.execute(_CREATE_TABLE)
+            conn.execute(_CREATE_APPROVALS_TABLE)
             # Run migrations for existing databases
             for migration in _MIGRATIONS:
                 try:
@@ -304,6 +336,69 @@ class SqliteStore:
         with self._lock:
             with self._connect() as conn:
                 cursor = conn.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
+                return cursor.rowcount > 0
+
+    # -- approvals (write-through storage for ApprovalQueue) --
+
+    def save_approval(self, req: Any) -> None:
+        d = req.to_storage_dict()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO approvals
+                       (approval_id, session_id, tool_name, tool_args, status,
+                        created_at, resolved_at, resolved_by, deny_reason, expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        d["approval_id"],
+                        d["session_id"],
+                        d["tool_name"],
+                        json.dumps(d["tool_args"], default=str),
+                        d["status"],
+                        d["created_at"],
+                        d["resolved_at"],
+                        d["resolved_by"],
+                        d["deny_reason"],
+                        d["expires_at"],
+                    ),
+                )
+
+    def load_approvals(self) -> List[Any]:
+        from .approval import ApprovalRequest
+
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT approval_id, session_id, tool_name, tool_args, status,
+                              created_at, resolved_at, resolved_by, deny_reason, expires_at
+                       FROM approvals"""
+                ).fetchall()
+        out = []
+        for r in rows:
+            out.append(
+                ApprovalRequest.from_dict(
+                    {
+                        "approval_id": r[0],
+                        "session_id": r[1],
+                        "tool_name": r[2],
+                        "tool_args": json.loads(r[3]),
+                        "status": r[4],
+                        "created_at": r[5],
+                        "resolved_at": r[6],
+                        "resolved_by": r[7],
+                        "deny_reason": r[8],
+                        "expires_at": r[9],
+                    }
+                )
+            )
+        return out
+
+    def delete_approval(self, approval_id: str) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM approvals WHERE approval_id = ?", (approval_id,)
+                )
                 return cursor.rowcount > 0
 
     def delete_expired(self, max_age_seconds: float) -> int:

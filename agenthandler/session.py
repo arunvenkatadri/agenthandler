@@ -75,6 +75,7 @@ class SessionManager:
         pre_guardrails: Optional[List[Any]] = None,
         post_guardrails: Optional[List[Any]] = None,
         pricing: Optional[Any] = None,
+        approval_ttl: Optional[float] = None,
     ):
         from .observe import PricingTable
 
@@ -83,7 +84,7 @@ class SessionManager:
         self._audit_sinks: Dict[str, MemoryAuditSink] = {}
         self._original_policies: Dict[str, Dict[str, Any]] = {}
         self._stateless_sessions: set[str] = set()
-        self._approval_queue = ApprovalQueue()
+        self._approval_queue = ApprovalQueue(store=store, default_ttl=approval_ttl)
         # Default to the built-in pricing table so costs work out of the box.
         self._observer = Observer(pricing=pricing or PricingTable.default())
         self._pre_guardrails: List[Any] = pre_guardrails or []

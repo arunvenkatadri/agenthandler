@@ -2,6 +2,14 @@
 
 All notable changes to AgentHandler are documented here.
 
+## [Unreleased]
+
+### Added
+- **Durable approvals**: `ApprovalQueue` accepts a `store` (MemoryStore/SqliteStore) and writes every mutation through, so pending human-in-the-loop approvals survive process restarts. New `approvals` table in `SqliteStore`.
+- **Approval TTLs**: per-call `ttl_seconds` on `submit()` and queue-wide `default_ttl` (also `SessionManager(approval_ttl=...)`); overdue pending approvals transition to `EXPIRED` lazily on access.
+- `ApprovalRequest.expires_at` field, `to_storage_dict()` / `from_dict()` for full-fidelity persistence (`to_dict()` still truncates args for API display).
+- `SessionManager` now wires its `StateStore` into the approval queue automatically.
+
 ## [0.92.0] — 2026-07-11
 
 ### Added
