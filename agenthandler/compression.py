@@ -23,6 +23,7 @@ Requires: pip install headroom-ai
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Callable, Coroutine, Dict, Optional
 
 from .policy import Policy
@@ -161,15 +162,13 @@ class CompressedSupervisor(Supervisor):
 
         if result.succeeded and self._compression != "off":
             if self._compression == "always" or self._should_compress(result.output):
-                result = SupervisedResult(
+                result = replace(
+                    result,
                     output=compress_output(
                         result.output,
                         model=self._target_model,
-                        min_tokens=self._min_tokens,
+                        min_tokens=0 if self._compression == "always" else self._min_tokens,
                     ),
-                    error=result.error,
-                    duration_ms=result.duration_ms,
-                    budget=result.budget,
                 )
 
         return result

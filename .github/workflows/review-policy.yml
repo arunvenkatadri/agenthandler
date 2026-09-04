@@ -1,0 +1,45 @@
+name: Review policy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  workflow_run:
+    workflows: [Claude PR Review]
+    types: [completed]
+  # Token-created reviews may not emit another workflow event; refresh them too.
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: PR number (leave empty to refresh all open PRs)
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: review-policy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Execute trusted policy, never code or scripts from a PR.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python .github/scripts/review_policy.py
+        env:
+          GH_TOKEN: ${{ github.token }}
