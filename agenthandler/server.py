@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Callable, Dict, List, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 try:
     from fastapi import (
@@ -175,8 +176,16 @@ def create_app(
         oauth_tokens=oauth_tokens,
     )
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(scheduler.stop)
+
     app = FastAPI(
         title="AgentHandler Control Plane",
+        lifespan=lifespan,
         version="0.93.0",
         description=(
             "REST API for managing agent sessions. "
@@ -545,7 +554,10 @@ def create_app(
                 raise HTTPException(status_code=400, detail="Cron expression required")
             if pipeline_fn is None:
                 raise HTTPException(status_code=400, detail="Pipeline POML required")
-            scheduler.add_cron(req.name, pipeline_fn, cron=req.cron)
+            try:
+                scheduler.add_cron(req.name, pipeline_fn, cron=req.cron)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             if not scheduler._running:
                 scheduler.start()
 
@@ -617,7 +629,7 @@ def create_app(
         """List all registered triggers."""
         triggers = scheduler.list_triggers()
         for name, wh in webhooks.items():
-            triggers.append({"name": name, "type": "webhook", "enabled": True})
+            triggers.append({"name": name, "type": "webhook", "enabled": wh.enabled})
         return triggers
 
     @app.get("/triggers/history")
@@ -635,17 +647,29 @@ def create_app(
         wh = webhooks.get(trigger_name)
         if wh is None:
             raise HTTPException(status_code=404, detail=f"Webhook '{trigger_name}' not found")
+        if not wh.enabled:
+            raise HTTPException(status_code=409, detail="Webhook is disabled")
         record = await wh.fire()
         return record.to_dict()
 
     @app.post("/triggers/{trigger_name}/enable")
     def enable_trigger(trigger_name: str, _: Any = Depends(auth)) -> Dict[str, Any]:
-        scheduler.enable(trigger_name)
+        if trigger_name in webhooks:
+            webhooks[trigger_name].enabled = True
+        elif any(t["name"] == trigger_name for t in scheduler.list_triggers()):
+            scheduler.enable(trigger_name)
+        else:
+            raise HTTPException(status_code=404, detail="Trigger not found")
         return {"name": trigger_name, "enabled": True}
 
     @app.post("/triggers/{trigger_name}/disable")
     def disable_trigger(trigger_name: str, _: Any = Depends(auth)) -> Dict[str, Any]:
-        scheduler.disable(trigger_name)
+        if trigger_name in webhooks:
+            webhooks[trigger_name].enabled = False
+        elif any(t["name"] == trigger_name for t in scheduler.list_triggers()):
+            scheduler.disable(trigger_name)
+        else:
+            raise HTTPException(status_code=404, detail="Trigger not found")
         return {"name": trigger_name, "enabled": False}
 
     @app.delete("/triggers/{trigger_name}")
