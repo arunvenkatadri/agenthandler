@@ -140,14 +140,9 @@ class TestScopeRule:
         assert rule.check(42) is True
         assert rule.check(99) is False
 
-    def test_unknown_constraint_passes(self):
-        """Unknown constraint type defaults to allowing."""
-        rule = ScopeRule(
-            param="x",
-            constraint="unknown",
-            values=["anything"],
-        )
-        assert rule.check("whatever") is True
+    def test_unknown_constraint_is_rejected(self):
+        with pytest.raises(ValueError, match="Unknown scope constraint"):
+            ScopeRule(param="x", constraint="unknown", values=["anything"])
 
     def test_to_dict(self):
         rule = ScopeRule(
