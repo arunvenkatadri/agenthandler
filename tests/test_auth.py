@@ -16,7 +16,13 @@ from agenthandler.store import MemoryStore
 
 @pytest.fixture(autouse=True)
 def clean_auth_env(monkeypatch):
-    for name in ("API_KEY", "OAUTH_PROVIDER", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET"):
+    for name in (
+        "API_KEY",
+        "OAUTH_PROVIDER",
+        "OAUTH_CLIENT_ID",
+        "OAUTH_CLIENT_SECRET",
+        "OAUTH_ALLOWED_SUBJECTS",
+    ):
         monkeypatch.delenv(f"AGENTHANDLER_{name}", raising=False)
 
 
@@ -31,6 +37,7 @@ def oauth_client(monkeypatch):
     monkeypatch.setenv("AGENTHANDLER_OAUTH_PROVIDER", "google")
     monkeypatch.setenv("AGENTHANDLER_OAUTH_CLIENT_ID", "client&special")
     monkeypatch.setenv("AGENTHANDLER_OAUTH_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS", "123")
     return make_client(require_auth=True)
 
 
@@ -38,7 +45,7 @@ def oauth_client(monkeypatch):
 def provider(monkeypatch):
     client = AsyncMock()
     client.post.return_value = httpx.Response(200, json={"access_token": "provider-token"})
-    client.get.return_value = httpx.Response(200, json={"email": "person@example.com"})
+    client.get.return_value = httpx.Response(200, json={"id": "123", "email": "person@example.com"})
     context = AsyncMock()
     context.__aenter__.return_value = client
     monkeypatch.setattr(httpx, "AsyncClient", lambda: context)
@@ -175,3 +182,51 @@ def test_api_key_websocket_and_unicode_rejection():
         with client.websocket_connect(f"/sessions/{sid}/events", params={"token": "🔑"}):
             pass
     assert exc.value.code == 4001
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"id": "456", "email": "person@example.com"},
+        {"email": "person@example.com"},
+        {"id": True},
+        [],
+    ],
+)
+def test_unlisted_identity_cannot_obtain_control_plane_access(oauth_client, provider, identity):
+    client, sid = oauth_client
+    provider.get.return_value = httpx.Response(200, json=identity)
+    response = login(client)
+    assert response.status_code == 403
+    assert "token" not in response.json()
+    assert client.get("/sessions").status_code == 401
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/sessions/{sid}/events"):
+            pass
+
+
+def test_github_authorizes_numeric_provider_id(oauth_client, provider, monkeypatch):
+    monkeypatch.setenv("AGENTHANDLER_OAUTH_PROVIDER", "github")
+    client, _ = make_client()
+    provider.get.return_value = httpx.Response(200, json={"id": 123, "login": "renamed-user"})
+    response = login(client)
+    assert response.status_code == 200
+    assert (
+        client.get(
+            "/sessions", headers={"Authorization": f"Bearer {response.json()['token']}"}
+        ).status_code
+        == 200
+    )
+
+
+def test_oauth_without_explicit_authorized_subjects_refuses_startup(oauth_client, monkeypatch):
+    monkeypatch.delenv("AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS")
+    with pytest.raises(ValueError, match="allowed_subjects"):
+        make_client()
+
+
+@pytest.mark.parametrize("setting", ["OAUTH_PROVIDER", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET"])
+def test_incomplete_oauth_configuration_does_not_open_public_access(monkeypatch, setting):
+    monkeypatch.setenv(f"AGENTHANDLER_{setting}", "configured")
+    with pytest.raises(ValueError, match="OAuth requires"):
+        make_client()

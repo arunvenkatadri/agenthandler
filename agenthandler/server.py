@@ -165,6 +165,14 @@ def create_app(
     oauth_provider = os.environ.get("AGENTHANDLER_OAUTH_PROVIDER")
     oauth_client_id = os.environ.get("AGENTHANDLER_OAUTH_CLIENT_ID", "")
     oauth_client_secret = os.environ.get("AGENTHANDLER_OAUTH_CLIENT_SECRET", "")
+    oauth_config = (oauth_provider, oauth_client_id, oauth_client_secret)
+    if any(oauth_config) and not all(oauth_config):
+        raise ValueError("OAuth requires provider, client ID, and client secret together")
+    oauth_allowed_subjects = [
+        value.strip()
+        for value in os.environ.get("AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS", "").split(",")
+        if value.strip()
+    ]
     oauth_enabled = bool(oauth_provider and oauth_client_id and oauth_client_secret)
 
     oauth_tokens: Dict[str, Dict[str, Any]] = {}
@@ -212,7 +220,12 @@ def create_app(
     # Register OAuth routes if configured
     if oauth_enabled and oauth_provider:
         register_oauth_routes(
-            app, oauth_provider, oauth_client_id, oauth_client_secret, oauth_tokens
+            app,
+            oauth_provider,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_tokens,
+            allowed_subjects=oauth_allowed_subjects,
         )
 
     # ------------------------------------------------------------------
