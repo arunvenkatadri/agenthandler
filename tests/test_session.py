@@ -432,7 +432,7 @@ class TestStatelessSessions:
         mgr2 = SessionManager(store)
         with pytest.raises(AgentHandlerError) as exc_info:
             mgr2.resume(sid)
-        assert exc_info.value.kind == "session_not_recoverable"
+        assert exc_info.value.kind == "session_not_found"
 
     def test_stateless_stop_works(self):
         store = MemoryStore()
@@ -452,7 +452,7 @@ class TestStatelessSessions:
         sv.record_tokens(500)
         await sv.call("search", good_tool, query="test")
         # The checkpoint should still have 0 tokens (no auto-checkpoint)
-        cp = store.load_checkpoint(sid)
+        cp = mgr.status(sid)
         assert cp.tokens_used == 0
         assert cp.iterations == 0
 
@@ -559,3 +559,81 @@ class TestCrashLoopProtection:
         with pytest.raises(AgentHandlerError) as exc_info:
             mgr.resume(sid)
         assert exc_info.value.kind == "max_resumes_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_security_metadata_survives_tools_and_process_restarts(tmp_path):
+    from agenthandler.store import SqliteStore
+
+    path = str(tmp_path / "state.db")
+    mgr = SessionManager(SqliteStore(path))
+    sid = mgr.start("agent", {"max_resumes": 1})
+    checksum = mgr.status(sid).policy_checksum
+    sv = mgr.resume(sid)
+    await sv.call("search", good_tool, query="test")
+    cp = SqliteStore(path).load_checkpoint(sid)
+    assert cp.resume_count == 1
+    assert cp.policy_checksum == checksum
+    with pytest.raises(AgentHandlerError, match="resum"):
+        SessionManager(SqliteStore(path)).resume(sid)
+    assert SqliteStore(path).load_checkpoint(sid).failure_reason
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tampering_rejected_after_tool_checkpoint_and_restart(tmp_path):
+    from agenthandler.store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "state.db"))
+    mgr = SessionManager(store)
+    sid = mgr.start("agent", {"max_iterations": 2})
+    await mgr.get_supervisor(sid).call("search", good_tool)
+    cp = store.load_checkpoint(sid)
+    cp.policy_dict["max_iterations"] = 999
+    store.save_checkpoint(cp)
+    with pytest.raises(AgentHandlerError) as exc:
+        SessionManager(store).resume(sid)
+    assert exc.value.kind == "policy_tampered"
+
+
+@pytest.mark.asyncio
+async def test_stopped_and_replaced_supervisors_cannot_execute():
+    mgr = SessionManager(MemoryStore())
+    sid = mgr.start("agent")
+    old = mgr.get_supervisor(sid)
+    replacement = mgr.resume(sid)
+    assert (await old.call("search", good_tool)).error.kind == "agent_paused"
+    mgr.stop(sid)
+    assert (await replacement.call("search", good_tool)).error.kind == "agent_paused"
+    assert mgr.status(sid).status == SessionStatus.STOPPED
+
+
+def test_pause_resume_does_not_duplicate_or_drop_audit_entries():
+    mgr = SessionManager(MemoryStore())
+    sid = mgr.start("agent")
+    initial = mgr.get_audit_entries(sid)
+    mgr.pause(sid)
+    mgr.pause(sid)
+    assert mgr.get_audit_entries(sid) == initial
+    mgr.resume(sid)
+    after_resume = mgr.get_audit_entries(sid)
+    assert after_resume[: len(initial)] == initial
+    mgr.pause(sid)
+    assert mgr.get_audit_entries(sid) == after_resume
+    mgr.stop(sid)
+    assert mgr.get_audit_entries(sid)[: len(after_resume)] == after_resume
+
+
+@pytest.mark.asyncio
+async def test_stateless_session_never_writes_to_disk_even_after_resume(tmp_path):
+    from agenthandler.store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "state.db"))
+    mgr = SessionManager(store)
+    sid = mgr.start("agent", stateless=True, payload={"private": "data"})
+    mgr.pause(sid)
+    sv = mgr.resume(sid)
+    await sv.call("search", good_tool)
+    mgr.update_payload(sid, {"private": "updated"})
+    mgr.stop(sid)
+    assert store.list_sessions() == []
+    assert mgr.status(sid).status == SessionStatus.STOPPED

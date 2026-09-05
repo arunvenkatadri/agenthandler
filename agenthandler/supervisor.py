@@ -881,6 +881,10 @@ class Supervisor:
             timestamp=datetime.now(timezone.utc).isoformat(),
             created_at=existing.created_at if existing else "",
             audit_log=existing.audit_log if existing else [],
+            stateless=existing.stateless if existing else False,
+            resume_count=existing.resume_count if existing else 0,
+            failure_reason=existing.failure_reason if existing else "",
+            policy_checksum=existing.policy_checksum if existing else "",
         )
         try:
             self._store.save_checkpoint(cp)
