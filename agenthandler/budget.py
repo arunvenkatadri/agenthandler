@@ -63,6 +63,8 @@ class BudgetTracker:
 
     def record_tokens(self, tokens: int) -> int:
         """Record token usage. Returns new total. Raises if over budget."""
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+            raise ValueError("Token usage must be a non-negative integer")
         with self._lock:
             self._tokens_used += tokens
             if self._token_limit is not None and self._tokens_used > self._token_limit:

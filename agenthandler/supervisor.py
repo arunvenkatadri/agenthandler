@@ -22,7 +22,10 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, List, Optional
@@ -148,9 +151,10 @@ class Supervisor:
 
     def record_tokens(self, tokens: int) -> int:
         """Record token usage. Returns new total. Raises AgentHandlerError if over budget."""
-        total = self._budget.record_tokens(tokens)
-        self._auto_checkpoint()
-        return total
+        try:
+            return self._budget.record_tokens(tokens)
+        finally:
+            self._auto_checkpoint()
 
     def record_iteration(self) -> int:
         """Record an iteration of the agent loop. Returns iteration count.
@@ -172,6 +176,7 @@ class Supervisor:
                 AuditOutcome.DENIED,
                 detail=str(e),
             )
+            self._auto_checkpoint()
             raise
 
     def circuit_breaker_states(self) -> Dict[str, str]:
@@ -203,8 +208,8 @@ class Supervisor:
 
     def _check_paused(self) -> None:
         """Check if this supervisor is paused."""
-        if self._paused and self._session_id:
-            raise AgentHandlerError.agent_paused(self._session_id)
+        if self._paused:
+            raise AgentHandlerError.agent_paused(self._session_id or "")
 
     def _check_confirm(self, tool_name: str, kwargs: Dict[str, Any]) -> Optional[str]:
         """Check if this tool requires confirmation.
@@ -218,7 +223,10 @@ class Supervisor:
         if tool_name not in self._policy.require_confirm:
             return None
         if self._approval_queue is not None and self._session_id:
-            req = self._approval_queue.submit(tool_name, kwargs, self._session_id)
+            try:
+                req = self._approval_queue.submit(tool_name, kwargs, self._session_id)
+            except RuntimeError as exc:
+                raise AgentHandlerError.policy_denied(str(exc)) from exc
             return req.approval_id
         raise AgentHandlerError.policy_denied(f"Tool '{tool_name}' requires user confirmation")
 
@@ -257,15 +265,29 @@ class Supervisor:
         Returns:
             SupervisedResult with output or error (never raises)
         """
+        return await self._call(tool_name, fn, kwargs)
+
+    async def _call(
+        self,
+        tool_name: str,
+        fn: Callable[..., Coroutine[Any, Any, Any]],
+        kwargs: Dict[str, Any],
+        *,
+        confirmed: bool = False,
+    ) -> SupervisedResult:
         start = time.monotonic()
-        self._last_activity = start
 
         # Pre-flight checks
         try:
             self._check_paused()
             self._check_request_timeout()
             self._check_silence()
-            approval_id = self._check_confirm(tool_name, kwargs)
+            snap = self._budget.snapshot()
+            if snap.token_limit is not None and snap.tokens_used >= snap.token_limit:
+                raise AgentHandlerError.budget_exceeded(snap.tokens_used, snap.token_limit)
+            if snap.iterations > snap.iteration_limit:
+                raise AgentHandlerError.max_iterations(snap.iterations, snap.iteration_limit)
+            approval_id = None if confirmed else self._check_confirm(tool_name, kwargs)
             if approval_id is not None:
                 self._audit.record(
                     AuditPhase.POLICY_CHECK,
@@ -280,7 +302,14 @@ class Supervisor:
                     budget=self._budget.snapshot(),
                     tool_name=tool_name,
                 )
-            self._check_scopes(tool_name, kwargs)
+            scope_args = kwargs
+            try:
+                bound = inspect.signature(fn).bind(**kwargs)
+                bound.apply_defaults()
+                scope_args = {**kwargs, **bound.arguments}
+            except (TypeError, ValueError):
+                pass  # Dynamic callables may not expose a signature.
+            self._check_scopes(tool_name, scope_args)
         except AgentHandlerError as e:
             phase = (
                 AuditPhase.SCOPE_CHECK
@@ -289,24 +318,6 @@ class Supervisor:
             )
             self._audit.record(
                 phase,
-                AuditOutcome.DENIED,
-                target=tool_name,
-                detail=str(e),
-            )
-            return SupervisedResult(
-                error=e,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                budget=self._budget.snapshot(),
-                tool_name=tool_name,
-            )
-
-        # Circuit breaker check
-        cb = self._get_circuit_breaker(tool_name)
-        try:
-            cb.check(tool_name)
-        except AgentHandlerError as e:
-            self._audit.record(
-                AuditPhase.CIRCUIT_BREAKER,
                 AuditOutcome.DENIED,
                 target=tool_name,
                 detail=str(e),
@@ -365,72 +376,78 @@ class Supervisor:
             metadata={"args": audit_args},
         )
 
-        # If a pre-guardrail provided cached output (idempotency), skip execution
-        if cached_output is not None:
-            output = cached_output
-            duration_ms = int((time.monotonic() - start) * 1000)
-            cb.record_success()
-            self._audit.record(
-                AuditPhase.TOOL_CALL,
-                AuditOutcome.INFO,
-                target=tool_name,
-                detail=f"Returned cached result in {duration_ms}ms",
-            )
-            result = SupervisedResult(
-                output=output,
-                succeeded=True,
-                duration_ms=duration_ms,
-                budget=self._budget.snapshot(),
-                tool_name=tool_name,
-            )
-            self._observe_call(result)
-            return result
+        output = cached_output
+        if cached_output is None:
+            # Circuit breaker check
+            cb = self._get_circuit_breaker(tool_name)
+            try:
+                generation = cb.check(tool_name)
+            except AgentHandlerError as e:
+                self._audit.record(
+                    AuditPhase.CIRCUIT_BREAKER,
+                    AuditOutcome.DENIED,
+                    target=tool_name,
+                    detail=str(e),
+                )
+                return SupervisedResult(
+                    error=e,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                )
 
-        try:
-            output = await asyncio.wait_for(
-                fn(**exec_kwargs),
-                timeout=self._policy.tool_timeout,
+            timeout = min(
+                self._policy.tool_timeout,
+                max(0.0, self._policy.request_timeout - (time.monotonic() - self._start_time)),
             )
-        except asyncio.TimeoutError:
-            cb.record_failure()
-            error = AgentHandlerError.timeout(int(self._policy.tool_timeout * 1000))
-            self._audit.record(
-                AuditPhase.TOOL_CALL,
-                AuditOutcome.TIMED_OUT,
-                target=tool_name,
-                detail=str(error),
-            )
-            r = SupervisedResult(
-                error=error,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                budget=self._budget.snapshot(),
-                tool_name=tool_name,
-            )
-            self._observe_call(r)
-            return r
-        except Exception as e:
-            cb.record_failure()
-            error_msg = str(e)
-            if self._redactor:
-                error_msg = self._redactor.redact(error_msg).text
-            error = AgentHandlerError.tool_error(error_msg)
-            self._audit.record(
-                AuditPhase.TOOL_CALL,
-                AuditOutcome.FAILED,
-                target=tool_name,
-                detail=error_msg,
-            )
-            r = SupervisedResult(
-                error=error,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                budget=self._budget.snapshot(),
-                tool_name=tool_name,
-            )
-            self._observe_call(r)
-            return r
+            try:
+                output = await asyncio.wait_for(
+                    fn(**exec_kwargs),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                cb.record_failure(generation)
+                error = AgentHandlerError.timeout(int(timeout * 1000))
+                self._audit.record(
+                    AuditPhase.TOOL_CALL,
+                    AuditOutcome.TIMED_OUT,
+                    target=tool_name,
+                    detail=str(error),
+                )
+                r = SupervisedResult(
+                    error=error,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                )
+                self._observe_call(r)
+                return r
+            except asyncio.CancelledError:
+                cb.record_failure(generation)
+                raise
+            except Exception as e:
+                cb.record_failure(generation)
+                error_msg = str(e)
+                if self._redactor:
+                    error_msg = self._redactor.redact(error_msg).text
+                error = AgentHandlerError.tool_error(error_msg)
+                self._audit.record(
+                    AuditPhase.TOOL_CALL,
+                    AuditOutcome.FAILED,
+                    target=tool_name,
+                    detail=error_msg,
+                )
+                r = SupervisedResult(
+                    error=error,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                )
+                self._observe_call(r)
+                return r
 
-        # Success
-        cb.record_success()
+            # Success
+            cb.record_success(generation)
         duration_ms = int((time.monotonic() - start) * 1000)
         self._last_activity = time.monotonic()
 
@@ -474,11 +491,6 @@ class Supervisor:
         if len(self._recent_calls) > 50:
             self._recent_calls = self._recent_calls[-50:]
 
-        # Call idempotency cache recording on any pre-guardrail that supports it
-        for gr in self._pre_guardrails:
-            if hasattr(gr, "record"):
-                gr.record(tool_name, exec_kwargs, output)
-
         # Inbound PII redaction — clean output before agent sees it
         if self._redactor and self._redact_direction in ("inbound", "both"):
             if isinstance(output, str):
@@ -510,7 +522,18 @@ class Supervisor:
         call_input_tokens = 0
         call_output_tokens = 0
         call_model = ""
-        if isinstance(output, dict):
+        if isinstance(output, dict) and cached_output is None:
+            for field in ("tokens_used", "input_tokens", "output_tokens"):
+                value = output.get(field, 0)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    return SupervisedResult(
+                        error=AgentHandlerError.tool_error(
+                            f"Invalid non-negative token count: {field}"
+                        ),
+                        budget=self._budget.snapshot(),
+                        tool_name=tool_name,
+                        duration_ms=duration_ms,
+                    )
             if "tokens_used" in output:
                 tokens = output["tokens_used"]
             if "input_tokens" in output:
@@ -540,6 +563,7 @@ class Supervisor:
                     target=tool_name,
                     detail=str(e),
                 )
+                self._auto_checkpoint()
                 # Budget exceeded — still return the output (best effort)
                 return SupervisedResult(
                     output=output,
@@ -549,6 +573,15 @@ class Supervisor:
                     budget=self._budget.snapshot(),
                     tool_name=tool_name,
                 )
+
+        if cached_output is None:
+            from .guardrails.deterministic import IdempotencyGuard
+
+            for gr in self._pre_guardrails:
+                if isinstance(gr, IdempotencyGuard):
+                    gr.record(tool_name, kwargs, output, context=gr_context)
+                elif hasattr(gr, "record"):
+                    gr.record(tool_name, kwargs, output)
 
         self._audit.record(
             AuditPhase.TOOL_CALL,
@@ -596,7 +629,7 @@ class Supervisor:
         from .approval import ApprovalStatus
 
         req = self._approval_queue.get(approval_id)
-        if req is None:
+        if req is None or req.session_id != self._session_id:
             return SupervisedResult(
                 error=AgentHandlerError.policy_denied(f"Approval {approval_id} not found"),
                 budget=self._budget.snapshot(),
@@ -607,12 +640,27 @@ class Supervisor:
                 budget=self._budget.snapshot(),
                 tool_name=req.tool_name,
             )
+        if req.status in (ApprovalStatus.CONSUMED, ApprovalStatus.EXPIRED):
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied("Approval is no longer executable"),
+                budget=self._budget.snapshot(),
+                tool_name=req.tool_name,
+            )
         if req.status != ApprovalStatus.APPROVED:
             return SupervisedResult(
                 error=AgentHandlerError.approval_pending(req.tool_name, approval_id),
                 budget=self._budget.snapshot(),
                 tool_name=req.tool_name,
             )
+
+        claimed = self._approval_queue.consume(approval_id, self._session_id or "")
+        if claimed is None:
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied("Approval is no longer executable"),
+                budget=self._budget.snapshot(),
+                tool_name=req.tool_name,
+            )
+        req = claimed
 
         # Approved — execute bypassing _check_confirm
         self._audit.record(
@@ -623,18 +671,7 @@ class Supervisor:
             metadata={"approval_id": approval_id},
         )
 
-        # Run through the normal execution path but skip confirmation
-        # We temporarily remove the tool from require_confirm
-        original_confirm = list(self._policy.require_confirm)
-        self._policy.require_confirm = [
-            t for t in self._policy.require_confirm if t != req.tool_name
-        ]
-        try:
-            result = await self.call(req.tool_name, fn, **req.tool_args)
-        finally:
-            self._policy.require_confirm = original_confirm
-
-        return result
+        return await self._call(req.tool_name, fn, req.tool_args, confirmed=True)
 
     def call_sync(
         self,
@@ -648,22 +685,24 @@ class Supervisor:
         For use when you don't have an event loop.
         """
 
+        # Threads cannot be forcibly killed. A timed-out tool may still finish
+        # its side effects; do not retry it without an idempotency strategy.
+        workers = ThreadPoolExecutor(max_workers=1)
+
+        @functools.wraps(fn)
         async def _wrapper(**kw: Any) -> Any:
-            return fn(**kw)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(workers, functools.partial(fn, **kw))
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're inside an async context — can't use run()
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, self.call(tool_name, _wrapper, **kwargs))
-                    return future.result(timeout=self._policy.tool_timeout + 5)
-            else:
-                return loop.run_until_complete(self.call(tool_name, _wrapper, **kwargs))
-        except RuntimeError:
-            return asyncio.run(self.call(tool_name, _wrapper, **kwargs))
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.call(tool_name, _wrapper, **kwargs))
+            with ThreadPoolExecutor(max_workers=1) as runner:
+                return runner.submit(asyncio.run, self.call(tool_name, _wrapper, **kwargs)).result()
+        finally:
+            workers.shutdown(wait=False, cancel_futures=True)
 
     def finish(self) -> BudgetSnapshot:
         """Mark the request as complete. Returns final budget snapshot."""
@@ -769,6 +808,7 @@ class Supervisor:
         """Build the context dict passed to guardrails."""
         return {
             "session_id": self._session_id or "",
+            "cache_namespace": self._session_id or f"supervisor:{id(self)}",
             "agent_id": self._agent_id or "",
             "recent_calls": list(self._recent_calls),
             "iterations": self._budget.snapshot().iterations,
@@ -776,6 +816,32 @@ class Supervisor:
         }
 
     async def _run_guardrail(
+        self,
+        guardrail: Any,
+        tool_name: str,
+        kwargs: Dict[str, Any],
+        output: Any,
+        context: Dict[str, Any],
+        phase: str,
+    ) -> Any:
+        """Fail closed if a guardrail errors, stalls, or returns an invalid result."""
+        from .guardrails.types import GuardrailResult
+
+        remaining = max(0.0, self._policy.request_timeout - (time.monotonic() - self._start_time))
+        try:
+            result = await asyncio.wait_for(
+                self._evaluate_guardrail(guardrail, tool_name, kwargs, output, context, phase),
+                timeout=min(self._policy.tool_timeout, remaining),
+            )
+            if not isinstance(result, GuardrailResult):
+                raise TypeError("Expected GuardrailResult")
+            return result
+        except Exception:
+            return GuardrailResult.block(
+                "Guardrail could not complete", getattr(guardrail, "name", "unknown")
+            )
+
+    async def _evaluate_guardrail(
         self,
         guardrail: Any,
         tool_name: str,
@@ -820,15 +886,19 @@ class Supervisor:
                 sig = inspect.signature(guardrail.check)
                 params = sig.parameters
                 if "output" in params:
-                    return guardrail.check(tool_name, kwargs, output, context)
-                return guardrail.check(tool_name, kwargs, context)
+                    return await asyncio.to_thread(
+                        guardrail.check, tool_name, kwargs, output, context
+                    )
+                return await asyncio.to_thread(guardrail.check, tool_name, kwargs, context)
         except Exception as e:
             return GuardrailResult(
-                allowed=True,
+                allowed=False,
                 guardrail_name=getattr(guardrail, "name", "unknown"),
-                reason=f"Guardrail error (allowing): {e}",
+                reason=f"Guardrail error: {type(e).__name__}",
             )
-        return GuardrailResult.allow(getattr(guardrail, "name", "unknown"))
+        return GuardrailResult.block(
+            "Guardrail has no check method", getattr(guardrail, "name", "unknown")
+        )
 
     def _observe_call(self, result: SupervisedResult) -> None:
         """Record a tool call with the observer if configured."""
@@ -881,6 +951,10 @@ class Supervisor:
             timestamp=datetime.now(timezone.utc).isoformat(),
             created_at=existing.created_at if existing else "",
             audit_log=existing.audit_log if existing else [],
+            stateless=existing.stateless if existing else False,
+            resume_count=existing.resume_count if existing else 0,
+            failure_reason=existing.failure_reason if existing else "",
+            policy_checksum=existing.policy_checksum if existing else "",
         )
         try:
             self._store.save_checkpoint(cp)

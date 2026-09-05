@@ -40,6 +40,13 @@ class ScopeRule:
     constraint: str  # "allow", "block", or "match"
     values: List[str]  # patterns (glob-style for allow/block, regex for match)
 
+    def __post_init__(self) -> None:
+        if self.constraint not in {"allow", "block", "match"}:
+            raise ValueError(f"Unknown scope constraint: {self.constraint}")
+        if self.constraint == "match":
+            for pattern in self.values:
+                re.compile(pattern)
+
     def check(self, param_value: Any) -> bool:
         """Returns True if the value is allowed by this rule."""
         str_value = str(param_value)
