@@ -220,8 +220,8 @@ class Supervisor:
         if self._approval_queue is not None and self._session_id:
             try:
                 req = self._approval_queue.submit(tool_name, kwargs, self._session_id)
-            except RuntimeError as exc:
-                raise AgentHandlerError.policy_denied(str(exc)) from exc
+            except Exception as exc:
+                raise AgentHandlerError.policy_denied(f"Unable to queue approval: {exc}") from exc
             return req.approval_id
         raise AgentHandlerError.policy_denied(f"Tool '{tool_name}' requires user confirmation")
 

@@ -341,3 +341,24 @@ async def test_full_approval_queue_returns_supervised_error():
     result = await sv.call("delete_file", delete_file)
     assert result.error.kind == "policy_denied"
     assert not result.succeeded
+
+
+@pytest.mark.asyncio
+async def test_uncopyable_approval_arguments_return_supervised_error():
+    import threading
+
+    manager = SessionManager(MemoryStore())
+    sid = manager.start("agent", POLICY_WITH_CONFIRM)
+    sv = manager.get_supervisor(sid)
+    executed = False
+
+    async def tool(handle):
+        nonlocal executed
+        executed = True
+
+    result = await sv.call("delete_file", tool, handle=threading.Lock())
+    assert not result.succeeded
+    assert result.error.kind == "policy_denied"
+    assert "Unable to queue approval" in str(result.error)
+    assert not executed
+    assert manager.approval_queue.list_pending(sid) == []
