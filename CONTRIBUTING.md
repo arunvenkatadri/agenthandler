@@ -7,7 +7,7 @@ Thanks for your interest in contributing.
 ```bash
 git clone https://github.com/arunvenkatadri/AgentHandler.git
 cd AgentHandler
-pip install -e ".[dev]"
+pip install -e ".[dev,server]"
 ```
 
 ## Running checks
@@ -15,6 +15,9 @@ pip install -e ".[dev]"
 ```bash
 # Tests
 pytest tests/ -v
+
+# Include the coverage check used in CI
+pytest tests/ --cov=agenthandler --cov-fail-under=75
 
 # Lint
 ruff check .
@@ -32,6 +35,29 @@ All three must pass before submitting a PR.
 2. Write tests for any new functionality.
 3. Make sure all checks pass.
 4. Open a PR with a clear description of what changed and why.
+
+## Merge reviews
+
+All PRs must pass tests on Python 3.10–3.13, lint, formatting, type checking,
+package validation, and the `Review policy` status check. New commits require
+new reviews. Resolve review conversations before merging.
+
+- PRs authored by `arunvenkatadri`: a Codex or Claude review of the current commit.
+- PRs authored by anyone else: that AI review plus `arunvenkatadri`'s approving
+  GitHub review of the current commit.
+
+The author determines the requirement, regardless of who clicks Merge.
+The policy accepts submitted GitHub reviews from `chatgpt-codex-connector[bot]`
+or `claude[bot]`. A pending/dismissed review, an old commit's review, a regular
+comment, or an emoji reaction does not count. Requested changes must be cleared
+by a fresh review from that reviewer. A Codex comment-only *submitted review*
+counts as a completed review; resolve its findings before merging.
+
+Paid reviews never run automatically. Only Arun can manually dispatch
+`Claude PR Review` on `main`, and the `ai-review` environment requires Arun's
+approval before obtaining a federated API token. The deterministic merge gate uses no model
+API or paid secret. See [GitHub setup](docs/github-review-setup.md) for activation
+and credential configuration.
 
 ## Project structure
 

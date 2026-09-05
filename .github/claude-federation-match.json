@@ -1,0 +1,14 @@
+{
+  "subject_prefix": "repo:arunvenkatadri/agenthandler:environment:ai-review",
+  "audience": "https://api.anthropic.com",
+  "claims": {
+    "repository": "arunvenkatadri/agenthandler",
+    "repository_id": "1186435851",
+    "repository_owner": "arunvenkatadri",
+    "repository_owner_id": "16549185",
+    "actor_id": "16549185",
+    "ref": "refs/heads/main",
+    "workflow_ref": "arunvenkatadri/agenthandler/.github/workflows/claude-pr-review.yml@refs/heads/main",
+    "event_name": "workflow_dispatch"
+  }
+}

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import secrets
 from typing import Any, Callable, Dict, List, Optional
 
 try:
@@ -31,6 +30,7 @@ try:
         WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.security import HTTPAuthorizationCredentials
     from pydantic import BaseModel, Field
 except ImportError as e:
     raise ImportError(
@@ -160,17 +160,20 @@ def create_app(
     # Resolve API key: explicit param > env var > disabled
     resolved_key = api_key if api_key is not None else os.environ.get("AGENTHANDLER_API_KEY")
 
-    # If require_auth is set and no key is configured, reject all requests
-    if require_auth and resolved_key is None:
-        resolved_key = "__REJECT_ALL__"  # sentinel — no valid token can match this
-
     # OAuth config from env vars
     oauth_provider = os.environ.get("AGENTHANDLER_OAUTH_PROVIDER")
     oauth_client_id = os.environ.get("AGENTHANDLER_OAUTH_CLIENT_ID", "")
     oauth_client_secret = os.environ.get("AGENTHANDLER_OAUTH_CLIENT_SECRET", "")
     oauth_enabled = bool(oauth_provider and oauth_client_id and oauth_client_secret)
 
-    auth = make_auth_dependency(api_key=resolved_key, oauth_enabled=oauth_enabled)
+    oauth_tokens: Dict[str, Dict[str, Any]] = {}
+    auth_enabled = require_auth or resolved_key is not None or oauth_enabled
+    auth = make_auth_dependency(
+        api_key=resolved_key,
+        oauth_enabled=oauth_enabled,
+        require_auth=require_auth,
+        oauth_tokens=oauth_tokens,
+    )
 
     app = FastAPI(
         title="AgentHandler Control Plane",
@@ -179,7 +182,7 @@ def create_app(
             "REST API for managing agent sessions. "
             + (
                 "Authentication: Bearer token required."
-                if resolved_key
+                if auth_enabled
                 else "WARNING: No authentication configured. "
                 "Set AGENTHANDLER_API_KEY or pass api_key to create_app()."
             )
@@ -195,11 +198,13 @@ def create_app(
 
     # Stash on app state for tests
     app.state.manager = manager
-    app.state.auth_enabled = resolved_key is not None or oauth_enabled
+    app.state.auth_enabled = auth_enabled
 
     # Register OAuth routes if configured
     if oauth_enabled and oauth_provider:
-        register_oauth_routes(app, oauth_provider, oauth_client_id, oauth_client_secret)
+        register_oauth_routes(
+            app, oauth_provider, oauth_client_id, oauth_client_secret, oauth_tokens
+        )
 
     # ------------------------------------------------------------------
     # Endpoints
@@ -657,8 +662,7 @@ def create_app(
     async def session_events(websocket: WebSocket, session_id: str) -> None:
         """Stream audit events and status changes for a session.
 
-        WebSocket auth: pass the API key as a query param ?token=<key>
-        or in the first message after connect.
+        WebSocket auth: pass an API key or OAuth session as ?token=<token>.
 
         WARNING: The API key is sent as a query parameter because the
         WebSocket protocol does not support custom headers during the
@@ -667,13 +671,15 @@ def create_app(
         tokens or a ticket-based auth flow in production to limit exposure.
         """
         # WebSocket auth via query param
-        if resolved_key is not None:
+        if auth_enabled:
             token = websocket.query_params.get("token", "")
             # Reject obviously oversized tokens to prevent abuse
             if len(token) > 512:
                 await websocket.close(code=4001)
                 return
-            if not secrets.compare_digest(token, resolved_key):
+            try:
+                await auth(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token))
+            except HTTPException:
                 await websocket.close(code=4001)
                 return
 
