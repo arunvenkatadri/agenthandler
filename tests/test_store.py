@@ -269,3 +269,46 @@ class TestSqliteStore(StoreContractTests):
         assert deleted == 1
         assert store.load_checkpoint("old-session") is None
         assert store.load_checkpoint("new-session") is not None
+
+
+def test_sqlite_migrates_legacy_database_and_preserves_all_fields(tmp_path):
+    import sqlite3
+
+    from agenthandler.store import _CREATE_TABLE
+
+    path = str(tmp_path / "legacy.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(_CREATE_TABLE)
+        conn.execute(
+            "INSERT INTO checkpoints(session_id,agent_id,status,timestamp) "
+            "VALUES ('old','a','paused','2026-01-01T00:00:00+00:00')"
+        )
+    store = SqliteStore(path)
+    old = store.load_checkpoint("old")
+    assert old.resume_count == 0
+    cp = Checkpoint(
+        "new",
+        "a",
+        SessionStatus.FAILED,
+        stateless=True,
+        resume_count=2,
+        failure_reason="crash limit",
+        policy_checksum="verified",
+        payload={"nested": [1]},
+        audit_log=[{"event": "done"}],
+    )
+    store.save_checkpoint(cp)
+    reopened = SqliteStore(path)
+    assert reopened.load_checkpoint("new").to_dict() == cp.to_dict()
+    assert next(c for c in reopened.list_sessions() if c.session_id == "new") == cp
+
+
+def test_memory_store_isolates_nested_snapshots():
+    store = MemoryStore()
+    cp = Checkpoint("s", "a", SessionStatus.RUNNING, policy_dict={"nested": [1]})
+    store.save_checkpoint(cp)
+    cp.policy_dict["nested"].append(2)
+    loaded = store.load_checkpoint("s")
+    loaded.policy_dict["nested"].append(3)
+    store.list_sessions()[0].policy_dict["nested"].append(4)
+    assert store.load_checkpoint("s").policy_dict == {"nested": [1]}
