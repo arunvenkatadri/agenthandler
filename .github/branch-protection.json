@@ -2,14 +2,42 @@
   "required_status_checks": {
     "strict": true,
     "checks": [
-      {"context": "test (3.10)", "app_id": 15368},
-      {"context": "test (3.11)", "app_id": 15368},
-      {"context": "test (3.12)", "app_id": 15368},
-      {"context": "test (3.13)", "app_id": 15368},
-      {"context": "lint", "app_id": 15368},
-      {"context": "typecheck", "app_id": 15368},
-      {"context": "package", "app_id": 15368},
-      {"context": "Review policy", "app_id": 15368}
+      {
+        "context": "test (3.10)",
+        "app_id": 15368
+      },
+      {
+        "context": "test (3.11)",
+        "app_id": 15368
+      },
+      {
+        "context": "test (3.12)",
+        "app_id": 15368
+      },
+      {
+        "context": "test (3.13)",
+        "app_id": 15368
+      },
+      {
+        "context": "lint",
+        "app_id": 15368
+      },
+      {
+        "context": "typecheck",
+        "app_id": 15368
+      },
+      {
+        "context": "package",
+        "app_id": 15368
+      },
+      {
+        "context": "Review policy",
+        "app_id": 15368
+      },
+      {
+        "context": "browser",
+        "app_id": 15368
+      }
     ]
   },
   "enforce_admins": true,

@@ -1916,13 +1916,13 @@ function renderOverview() {
   const stoppedCount = AGENTS.filter(a => a.status === 'stopped').length;
 
   document.getElementById('sys-grid').innerHTML =
-    sysCard('$' + DEMO_COSTS.total_cost_usd.toFixed(2), 'This Month') +
+    sysCard('$' + DEMO_COSTS.total_cost_usd.toFixed(2), 'This Month (demo)') +
     sysCard(AGENTS.length, 'Agents') +
     sysCard(SKILLS.length, 'Skills') +
     sysCard(POLICIES.length, 'Policies') +
     sysCard(totalTools, 'Tools') +
-    sysCard(DEMO_COSTS.total_calls, 'API Calls') +
-    sysCard(DEMO_COSTS.total_tokens.toLocaleString(), 'Tokens') +
+    sysCard(DEMO_COSTS.total_calls, 'API Calls (demo)') +
+    sysCard(DEMO_COSTS.total_tokens.toLocaleString(), 'Tokens (demo)') +
     sysCard(runningCount, 'Running') +
     sysCard(pausedCount, 'Paused') +
     sysCard(stoppedCount, 'Stopped');
@@ -1945,13 +1945,13 @@ function renderOverview() {
       var paused = sessions.filter(function(s) { return s.status === 'paused'; }).length;
       var stopped = sessions.filter(function(s) { return s.status === 'stopped' || s.status === 'failed'; }).length;
       document.getElementById('sys-grid').innerHTML =
-        sysCard('$' + DEMO_COSTS.total_cost_usd.toFixed(2), 'This Month') +
+        sysCard('$' + DEMO_COSTS.total_cost_usd.toFixed(2), 'This Month (demo)') +
         sysCard(AGENTS.length + sessions.length, 'Agents') +
         sysCard(SKILLS.length, 'Skills') +
         sysCard(POLICIES.length, 'Policies') +
         sysCard(totalTools, 'Tools') +
-        sysCard(DEMO_COSTS.total_calls, 'API Calls') +
-        sysCard(DEMO_COSTS.total_tokens.toLocaleString(), 'Tokens') +
+        sysCard(DEMO_COSTS.total_calls, 'API Calls (demo)') +
+        sysCard(DEMO_COSTS.total_tokens.toLocaleString(), 'Tokens (demo)') +
         sysCard(runningCount + running, 'Running') +
         sysCard(pausedCount + paused, 'Paused') +
         sysCard(stoppedCount + stopped, 'Stopped');
@@ -2014,19 +2014,17 @@ function renderSkills() {
 }
 
 function renderCosts() {
-  // Try to fetch real cost data from the REST API; fall back to demo data.
   var base = getSessionsApiBase();
   var headers = getSessionsAuthHeaders();
-  fetch(base + '/metrics/costs', { headers: headers })
-    .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(live) {
-      if (live && live.total_calls > 0) {
-        renderCostsFromLive(live);
-      } else {
-        renderCostsFromDemo(DEMO_COSTS);
-      }
-    })
-    .catch(function() { renderCostsFromDemo(DEMO_COSTS); });
+  return fetch(base + '/metrics/costs', { headers: headers })
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(renderCostsFromLive)
+    .catch(function() {
+      document.getElementById('cost-totals').textContent = 'Cost data unavailable. Connect to the server with a valid API key.';
+      ['budgets-list', 'cost-by-agent', 'cost-hourly'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.replaceChildren();
+      });
+    });
 }
 
 function renderCostsFromLive(costs) {

@@ -80,3 +80,30 @@ test('agent-card chat handler treats a malicious name as data', () => {
   assert.deepEqual(calls, [attack]);
   assert.equal(ctx.compromised, undefined);
 });
+
+
+test('zero real usage remains zero instead of becoming demo spend', async () => {
+  let rendered;
+  const live = { total_calls: 0, total_cost_usd: 0, total_tokens: 0 };
+  const ctx = context({ getSessionsApiBase: () => '', getSessionsAuthHeaders: () => ({}),
+    fetch: async () => ({ ok: true, json: async () => live }),
+    renderCostsFromLive: value => { rendered = value; },
+  });
+  vm.runInContext(declaration('renderCosts'), ctx);
+  await ctx.renderCosts();
+  assert.equal(rendered, live);
+});
+
+test('unavailable cost data is reported and stale totals are cleared', async () => {
+  const elements = Object.fromEntries(['cost-totals', 'budgets-list', 'cost-by-agent', 'cost-hourly']
+    .map(id => [id, { textContent: 'stale', replaceChildren() { this.textContent = ''; } }]));
+  const ctx = context({ getSessionsApiBase: () => '', getSessionsAuthHeaders: () => ({}),
+    fetch: async () => ({ ok: false, status: 401 }),
+    renderCostsFromLive: () => assert.fail('Unauthorized data rendered'),
+    document: { getElementById: id => elements[id] },
+  });
+  vm.runInContext(declaration('renderCosts'), ctx);
+  await ctx.renderCosts();
+  assert.match(elements['cost-totals'].textContent, /unavailable/);
+  assert.equal(elements['cost-by-agent'].textContent, '');
+});

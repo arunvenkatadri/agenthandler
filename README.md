@@ -11,7 +11,6 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)]()
-[![Tests](https://img.shields.io/badge/tests-658-brightgreen.svg)]()
 
 *Every agent needs a handler.*
 
@@ -44,6 +43,23 @@ AgentHandler takes a different approach. **You define skills and agents declarat
 ```bash
 pip install agenthandler
 ```
+
+## Try the complete local workflow
+
+The [workbench](docs/workbench.md) runs an authenticated order-report workflow
+from a browser through supervised execution, disk persistence, and acceptance
+verification. It also resumes interrupted jobs without repeating a saved report.
+It is deterministic and makes no paid model calls.
+
+```bash
+pip install -e '.[server]'
+export AGENTHANDLER_API_KEY='choose-a-local-server-password'
+python -m agenthandler.workbench --data-dir .agenthandler
+```
+
+Open http://127.0.0.1:8000, connect with that password, and run the supplied orders.
+The expected verified total is **$12.60**. See the guide for browser tests and
+restart/recovery checks. Run these commands from a checkout containing this feature.
 
 ## Quick start
 
@@ -86,7 +102,9 @@ asyncio.run(main())
 
 ## Dashboard
 
-Open `dashboard.html` in a browser for a full management UI:
+**Integration requirement:** the older dashboard's chat, prompt builder, and chat-based Deploy flow require a separate application backend. The stock REST server manages sessions and registered pipelines; creating a session does not itself run an agent. Use the [workbench](docs/workbench.md) for the complete local workflow shipped here.
+
+Open `dashboard.html` in a browser for the management and integration UI:
 
 - **Agents** — create, edit, deploy, and manage agents. Each agent has a system prompt, task, assigned skills, policies, budget overrides, and an optional POML pipeline. Agents persist to localStorage across refreshes.
 - **LLM-powered agent builder** — describe what you want in plain English. Claude generates a system prompt, picks the right skills and policies, sets a schedule, suggests budgets, and creates a multi-step pipeline — all auto-applied. Hit "Refine" to iterate on the prompt.

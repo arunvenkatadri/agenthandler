@@ -20,7 +20,11 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
+
+if TYPE_CHECKING:
+    from .task import DurableTaskRunner
+    from .task_api import TaskTemplate
 
 try:
     from fastapi import (
@@ -138,6 +142,8 @@ def create_app(
     require_auth: bool = False,
     tool_registry: Optional[Dict[str, Any]] = None,
     llm: Optional[Any] = None,
+    task_runner: Optional[DurableTaskRunner] = None,
+    task_templates: Sequence[TaskTemplate] = (),
 ) -> FastAPI:
     """Build a FastAPI app wired to the given SessionManager.
 
@@ -216,6 +222,14 @@ def create_app(
     # Stash on app state for tests
     app.state.manager = manager
     app.state.auth_enabled = auth_enabled
+
+    if task_runner is not None:
+        from .task_api import register_task_routes
+
+        if task_runner.manager is not manager:
+            raise ValueError("Task runner and server must share the same SessionManager")
+        register_task_routes(app, task_runner, task_templates, auth)
+        app.state.task_runner = task_runner
 
     # Register OAuth routes if configured
     if oauth_enabled and oauth_provider:

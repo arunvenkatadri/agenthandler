@@ -15,7 +15,7 @@ gh api --method PUT repos/arunvenkatadri/agenthandler/branches/main/protection \
   --input .github/branch-protection.json
 ```
 
-This configuration requires all eight checks from GitHub Actions (App ID 15368),
+This configuration requires all nine checks from GitHub Actions (App ID 15368),
 an up-to-date branch, a PR, and resolved conversations. It applies to admins too
 and forbids force pushes and branch deletion. GitHub's blanket human approval
 count stays at zero: the custom gate implements the author-specific approval

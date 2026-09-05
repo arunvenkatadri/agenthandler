@@ -121,6 +121,7 @@ class TaskRecord:
     goal: str
     specs: List[Dict[str, Any]]
     limits: Dict[str, Any]
+    template_id: Optional[str] = None
     inputs: Dict[str, Any] = field(default_factory=dict)
     milestones: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     status: CompletionStatus = CompletionStatus.RUNNING
@@ -197,6 +198,18 @@ class SqliteTaskStore:
         value["status"] = CompletionStatus(value["status"])
         return TaskRecord(**value)
 
+    def list_tasks(self, limit: int = 100) -> List[TaskRecord]:
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT record FROM tasks ORDER BY rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+        records = []
+        for row in rows:
+            value = json.loads(row[0])
+            value["status"] = CompletionStatus(value["status"])
+            records.append(TaskRecord(**value))
+        return records
+
     def _save(self, record: TaskRecord, *, create: bool = False) -> None:
         value = json.dumps(asdict(record), allow_nan=False)
         with self._connection() as db:
@@ -231,6 +244,7 @@ class DurableTaskRunner:
         limits: Optional[TaskLimits] = None,
         policy_dict: Optional[Dict[str, Any]] = None,
         inputs: Optional[Dict[str, Any]] = None,
+        template_id: Optional[str] = None,
     ) -> TaskRecord:
         specs = [m.spec() for m in milestones]
         if not goal or not specs or len({s["id"] for s in specs}) != len(specs):
@@ -245,6 +259,7 @@ class DurableTaskRunner:
                 goal=goal,
                 specs=specs,
                 limits=asdict(limits),
+                template_id=template_id,
                 inputs=safe_inputs,
                 milestones={
                     s["id"]: {"state": "ready", "operation_id": uuid.uuid4().hex} for s in specs
