@@ -223,7 +223,10 @@ class Supervisor:
         if tool_name not in self._policy.require_confirm:
             return None
         if self._approval_queue is not None and self._session_id:
-            req = self._approval_queue.submit(tool_name, kwargs, self._session_id)
+            try:
+                req = self._approval_queue.submit(tool_name, kwargs, self._session_id)
+            except RuntimeError as exc:
+                raise AgentHandlerError.policy_denied(str(exc)) from exc
             return req.approval_id
         raise AgentHandlerError.policy_denied(f"Tool '{tool_name}' requires user confirmation")
 
@@ -262,6 +265,16 @@ class Supervisor:
         Returns:
             SupervisedResult with output or error (never raises)
         """
+        return await self._call(tool_name, fn, kwargs)
+
+    async def _call(
+        self,
+        tool_name: str,
+        fn: Callable[..., Coroutine[Any, Any, Any]],
+        kwargs: Dict[str, Any],
+        *,
+        confirmed: bool = False,
+    ) -> SupervisedResult:
         start = time.monotonic()
 
         # Pre-flight checks
@@ -274,7 +287,7 @@ class Supervisor:
                 raise AgentHandlerError.budget_exceeded(snap.tokens_used, snap.token_limit)
             if snap.iterations > snap.iteration_limit:
                 raise AgentHandlerError.max_iterations(snap.iterations, snap.iteration_limit)
-            approval_id = self._check_confirm(tool_name, kwargs)
+            approval_id = None if confirmed else self._check_confirm(tool_name, kwargs)
             if approval_id is not None:
                 self._audit.record(
                     AuditPhase.POLICY_CHECK,
@@ -616,7 +629,7 @@ class Supervisor:
         from .approval import ApprovalStatus
 
         req = self._approval_queue.get(approval_id)
-        if req is None:
+        if req is None or req.session_id != self._session_id:
             return SupervisedResult(
                 error=AgentHandlerError.policy_denied(f"Approval {approval_id} not found"),
                 budget=self._budget.snapshot(),
@@ -627,12 +640,27 @@ class Supervisor:
                 budget=self._budget.snapshot(),
                 tool_name=req.tool_name,
             )
+        if req.status in (ApprovalStatus.CONSUMED, ApprovalStatus.EXPIRED):
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied("Approval is no longer executable"),
+                budget=self._budget.snapshot(),
+                tool_name=req.tool_name,
+            )
         if req.status != ApprovalStatus.APPROVED:
             return SupervisedResult(
                 error=AgentHandlerError.approval_pending(req.tool_name, approval_id),
                 budget=self._budget.snapshot(),
                 tool_name=req.tool_name,
             )
+
+        claimed = self._approval_queue.consume(approval_id, self._session_id or "")
+        if claimed is None:
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied("Approval is no longer executable"),
+                budget=self._budget.snapshot(),
+                tool_name=req.tool_name,
+            )
+        req = claimed
 
         # Approved — execute bypassing _check_confirm
         self._audit.record(
@@ -643,18 +671,7 @@ class Supervisor:
             metadata={"approval_id": approval_id},
         )
 
-        # Run through the normal execution path but skip confirmation
-        # We temporarily remove the tool from require_confirm
-        original_confirm = list(self._policy.require_confirm)
-        self._policy.require_confirm = [
-            t for t in self._policy.require_confirm if t != req.tool_name
-        ]
-        try:
-            result = await self.call(req.tool_name, fn, **req.tool_args)
-        finally:
-            self._policy.require_confirm = original_confirm
-
-        return result
+        return await self._call(req.tool_name, fn, req.tool_args, confirmed=True)
 
     def call_sync(
         self,

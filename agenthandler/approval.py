@@ -17,6 +17,7 @@ Usage (internal — SessionManager wires this up automatically):
 
 import secrets
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,6 +29,7 @@ class ApprovalStatus(Enum):
     APPROVED = "approved"
     DENIED = "denied"
     EXPIRED = "expired"
+    CONSUMED = "consumed"
 
 
 @dataclass
@@ -107,7 +109,7 @@ class ApprovalQueue:
             approval_id=secrets.token_hex(8),
             session_id=session_id,
             tool_name=tool_name,
-            tool_args=tool_args,
+            tool_args=deepcopy(tool_args),
         )
         with self._lock:
             if len(self._requests) >= self._max_requests:
@@ -118,11 +120,25 @@ class ApprovalQueue:
                         "Resolve existing approvals before submitting new ones."
                     )
             self._requests[req.approval_id] = req
-        return req
+        return deepcopy(req)
 
     def get(self, approval_id: str) -> Optional[ApprovalRequest]:
         with self._lock:
-            return self._requests.get(approval_id)
+            return deepcopy(self._requests.get(approval_id))
+
+    def consume(self, approval_id: str, session_id: str) -> Optional[ApprovalRequest]:
+        """Atomically claim an approved call for its originating session, once.
+
+        An execution attempt consumes approval even if the tool fails. Retrying
+        a potentially side-effecting operation requires a fresh approval.
+        """
+        with self._lock:
+            req = self._requests.get(approval_id)
+            if req is None or req.session_id != session_id or req.status != ApprovalStatus.APPROVED:
+                return None
+            snapshot = deepcopy(req)
+            req.status = ApprovalStatus.CONSUMED
+            return snapshot
 
     def approve(self, approval_id: str, approved_by: str = "") -> Optional[ApprovalRequest]:
         """Approve a pending request. Returns the request, or None if not found."""
@@ -133,7 +149,7 @@ class ApprovalQueue:
             req.status = ApprovalStatus.APPROVED
             req.resolved_at = datetime.now(timezone.utc).isoformat()
             req.resolved_by = approved_by
-            return req
+            return deepcopy(req)
 
     def deny(
         self, approval_id: str, reason: str = "", denied_by: str = ""
@@ -147,12 +163,12 @@ class ApprovalQueue:
             req.deny_reason = reason
             req.resolved_at = datetime.now(timezone.utc).isoformat()
             req.resolved_by = denied_by
-            return req
+            return deepcopy(req)
 
     def list_pending(self, session_id: Optional[str] = None) -> List[ApprovalRequest]:
         """List pending approvals, optionally filtered by session."""
         with self._lock:
-            reqs = list(self._requests.values())
+            reqs = deepcopy(list(self._requests.values()))
         if session_id is not None:
             reqs = [r for r in reqs if r.session_id == session_id]
         return [r for r in reqs if r.status == ApprovalStatus.PENDING]
@@ -160,7 +176,7 @@ class ApprovalQueue:
     def list_all(self, session_id: Optional[str] = None) -> List[ApprovalRequest]:
         """List all approvals (any status), optionally filtered by session."""
         with self._lock:
-            reqs = list(self._requests.values())
+            reqs = deepcopy(list(self._requests.values()))
         if session_id is not None:
             reqs = [r for r in reqs if r.session_id == session_id]
         return reqs
