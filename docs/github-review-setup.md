@@ -37,15 +37,51 @@ require `arunvenkatadri` as reviewer, and disable administrator bypass.
 Paid reviews also check both `github.actor` and `github.triggering_actor` so
 another collaborator cannot start a run or re-run Arun's previous job.
 
-Store `ANTHROPIC_API_KEY` **only as an environment secret in `ai-review`**.
-Do not put it in repository or organization secrets accessible to ordinary PR
-workflows. Prefer a dedicated provider key with a provider-side spending limit.
-No key is provisioned by this change and no paid review has been run.
+The workflow uses Anthropic workload identity federation with the existing
+service account. No API key is required. GitHub issues an identity token only
+after the environment approval; Anthropic validates the federation rule before
+issuing a short-lived API token. Keep a workspace spending limit as a billing
+backstop. No paid review has been run during setup.
+
+Register the GitHub Actions issuer in Claude Console:
+
+| Field | Value |
+| --- | --- |
+| Name | `github-actions` |
+| Issuer URL | `https://token.actions.githubusercontent.com` |
+| JWKS source | OIDC discovery |
+| Discovery base URL / CA certificate | Leave blank |
+| Single-use tokens | Enabled |
+| Maximum token lifetime | 1 hour |
+
+Then create a federation rule named `agenthandler-review` using that issuer and
+your existing service account. Use the exact `match` object from
+[claude-federation-match.json](../.github/claude-federation-match.json). It binds
+the rule to this repository ID, owner ID, actor ID, main branch, review workflow,
+manual-dispatch event, and protected `ai-review` environment. The subject is an
+exact match, without a trailing wildcard. Repository names alone are not the
+entire trust boundary.
+
+Set the rule's workspace to this repo's workspace, OAuth scope to
+`workspace:developer`, and issued access-token lifetime to 600 seconds. The
+existing service account must belong to that workspace. The issuer's one-hour
+maximum applies to the incoming GitHub identity token, separately from the
+600-second access token issued by Anthropic.
+
+Store these non-secret IDs as **variables** in GitHub's `ai-review` environment:
+
+- `ANTHROPIC_FEDERATION_RULE_ID` (`fdrl_...`)
+- `ANTHROPIC_ORGANIZATION_ID` (organization UUID)
+- `ANTHROPIC_SERVICE_ACCOUNT_ID` (`svac_...`)
+- `ANTHROPIC_WORKSPACE_ID` (`wrkspc_...`)
+
+If owner-only comment triggers are added later, update the event restriction in
+the federation rule at the same time; the current rule accepts manual runs only.
 
 To use Claude:
 
 1. Install the official Claude GitHub App for this repository.
-2. Add the environment secret as described above.
+2. Register the issuer/rule and configure the environment variables above.
 3. Once the manual workflow is on `main`, enable `Claude PR Review` in Actions.
 4. Arun dispatches it with an open, ready PR number, then approves the environment.
 
@@ -76,4 +112,5 @@ review is accepted.
 References: [Codex GitHub reviews](https://learn.chatgpt.com/docs/third-party/github),
 [Claude Code Action](https://github.com/anthropics/claude-code-action),
 [Claude CLI limits](https://code.claude.com/docs/en/cli-reference), and
+[Anthropic GitHub federation](https://platform.claude.com/docs/en/manage-claude/wif-providers/github-actions),
 [GitHub branch protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).

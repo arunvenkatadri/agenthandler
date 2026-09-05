@@ -55,7 +55,7 @@ counts as a completed review; resolve its findings before merging.
 
 Paid reviews never run automatically. Only Arun can manually dispatch
 `Claude PR Review` on `main`, and the `ai-review` environment requires Arun's
-approval before releasing its key. The deterministic merge gate uses no model
+approval before obtaining a federated API token. The deterministic merge gate uses no model
 API or paid secret. See [GitHub setup](docs/github-review-setup.md) for activation
 and credential configuration.
 

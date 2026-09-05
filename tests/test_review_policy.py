@@ -1,6 +1,7 @@
 """The merge gate must reject stale, missing, dismissed, and spoofed reviews."""
 
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -152,3 +153,28 @@ def test_review_gate_uses_only_trusted_base_code_and_no_paid_secrets():
     assert checkout["with"]["persist-credentials"] == "false"
     assert "secrets." not in text
     assert "anthropic" not in text.lower()
+
+
+def test_federation_matches_only_the_protected_review_job():
+    match = json.loads((ROOT / ".github/claude-federation-match.json").read_text())
+    text = (ROOT / ".github/workflows/claude-pr-review.yml").read_text()
+    workflow = yaml.load(text, Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["claude-review"]
+    action = next(s for s in job["steps"] if s.get("id") == "claude")["with"]
+    assert match["subject_prefix"] == (
+        f"repo:arunvenkatadri/agenthandler:environment:{job['environment']}"
+    )
+    assert match["audience"] == action["anthropic_oidc_audience"]
+    assert set(workflow["on"]) == {match["claims"]["event_name"]}
+    assert match["claims"]["repository_id"] == "1186435851"
+    assert match["claims"]["actor_id"] == match["claims"]["repository_owner_id"] == "16549185"
+    assert match["claims"]["workflow_ref"] == (
+        "arunvenkatadri/agenthandler/.github/workflows/claude-pr-review.yml@refs/heads/main"
+    )
+    assert match["claims"]["ref"] == "refs/heads/main"
+    assert job["permissions"]["id-token"] == "write"
+    for field in ("federation_rule_id", "organization_id", "service_account_id", "workspace_id"):
+        assert action[f"anthropic_{field}"] == "${{ vars.ANTHROPIC_" + field.upper() + " }}"
+    assert "anthropic_api_key" not in action
+    assert "claude_code_oauth_token" not in action
+    assert "secrets." not in text
