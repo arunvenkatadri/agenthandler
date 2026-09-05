@@ -377,7 +377,7 @@ The REST endpoint `GET /pipelines/schema` returns the schema for all registered 
 
 ## Reflection loops (agents that actually think)
 
-Long-duration agents don't just loop `run()` forever. They think → act → observe → reflect → think again. Each phase is its own LLM call, each phase is audited, and the reflection output feeds into the next think phase.
+Long-duration agents don't just loop `run()` forever. They think → act → observe → reflect → think again. Think, observe, and reflect use your LLM callback; tool execution is supervised and audited. Reflections feed into the next think phase.
 
 ```python
 from agenthandler import ReflectionLoop, SessionManager, MemoryStore
@@ -399,7 +399,9 @@ for c in result.cycles:
     print(f"  {c.thought} → {c.tool_called} → {c.reflection}")
 ```
 
-Each cycle is fully supervised. Guardrails apply. Crashes are recoverable. Every reflection is in the audit log. This is what distinguishes "agent ran for 72 hours doing useful work" from "agent ran in circles for 72 hours."
+A model completion claim produces `status="proposed"` and `completed=False`. Supply a trusted async `verifier` returning `VerificationResult` to certify completion with acceptance evidence. Malformed responses are invalid; blocked work remains incomplete. Reflection history is local to this run.
+
+For restartable jobs, use the optional `DurableTaskRunner` with `SqliteTaskStore`. It persists milestone progress, operation IDs, verification evidence, and lifetime budget reservations. Uncertain external operations require reconciliation before replay. See [durable tasks and completion semantics](docs/durable-tasks.md) for the API, migration notes, and adapter requirements.
 
 See `examples/long_running_agent.py` for a full reference implementation.
 
