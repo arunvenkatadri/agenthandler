@@ -608,7 +608,13 @@ class Supervisor:
 
         from .approval import ApprovalStatus
 
-        req = self._approval_queue.get(approval_id)
+        try:
+            req = self._approval_queue.get(approval_id)
+        except Exception as exc:
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied(f"Unable to snapshot approval: {exc}"),
+                budget=self._budget.snapshot(),
+            )
         if req is None or req.session_id != self._session_id:
             return SupervisedResult(
                 error=AgentHandlerError.policy_denied(f"Approval {approval_id} not found"),
@@ -633,7 +639,13 @@ class Supervisor:
                 tool_name=req.tool_name,
             )
 
-        claimed = self._approval_queue.consume(approval_id, self._session_id or "")
+        try:
+            claimed = self._approval_queue.consume(approval_id, self._session_id or "")
+        except Exception as exc:
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied(f"Unable to snapshot approval: {exc}"),
+                budget=self._budget.snapshot(),
+            )
         if claimed is None:
             return SupervisedResult(
                 error=AgentHandlerError.policy_denied("Approval is no longer executable"),
