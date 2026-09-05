@@ -89,6 +89,8 @@ class KafkaStreamConnector:
 
     async def start(self) -> None:
         """Start consuming messages."""
+        if self._running:
+            return
         try:
             from aiokafka import AIOKafkaConsumer
         except ImportError as e:
@@ -113,19 +115,22 @@ class KafkaStreamConnector:
                 if not self._running:
                     break
                 payload = {
-                    "key": msg.key.decode() if msg.key else None,
+                    "key": msg.key.decode(errors="replace") if msg.key else None,
                     "value": msg.value,
                     "topic": msg.topic,
                     "partition": msg.partition,
                     "offset": msg.offset,
                     "timestamp": msg.timestamp,
                 }
-                try:
-                    await self._on_message(payload)
-                    await self._consumer.commit()
-                except Exception:
-                    # Don't commit — message will be redelivered
-                    pass
+                # Do not advance to later records: committing one of them would
+                # also skip this failed record's offset permanently.
+                while self._running:
+                    try:
+                        await self._on_message(payload)
+                        await self._consumer.commit()
+                        break
+                    except Exception:
+                        await asyncio.sleep(1)
         except Exception:
             pass
 
@@ -223,10 +228,12 @@ class KinesisStreamConnector:
                                 "sequence_number": record.get("SequenceNumber"),
                                 "shard_id": shard_id,
                             }
-                            try:
-                                await self._on_message(payload)
-                            except Exception:
-                                pass
+                            while self._running:
+                                try:
+                                    await self._on_message(payload)
+                                    break
+                                except Exception:
+                                    await asyncio.sleep(1)
                         iterators[shard_id] = resp.get("NextShardIterator")
                     except Exception:
                         pass
@@ -283,6 +290,8 @@ class RedisStreamConnector:
 
     async def start(self) -> None:
         """Start consuming from the Redis stream."""
+        if self._running:
+            return
         try:
             import redis.asyncio as redis
         except ImportError as e:
@@ -293,8 +302,11 @@ class RedisStreamConnector:
         # Create consumer group (idempotent)
         try:
             await self._redis.xgroup_create(self._stream, self._group, id="$", mkstream=True)
-        except Exception:
-            pass  # group already exists
+        except Exception as exc:
+            if not str(exc).startswith("BUSYGROUP"):
+                await self._redis.aclose()
+                self._redis = None
+                raise
 
         self._running = True
         self._task = asyncio.create_task(self._consume_loop())
@@ -303,13 +315,23 @@ class RedisStreamConnector:
         """Main consume loop — uses XREADGROUP for consumer group semantics."""
         while self._running:
             try:
+                # Recover unacknowledged messages assigned to this consumer
+                # before requesting new entries. '>' alone never redelivers them.
                 messages = await self._redis.xreadgroup(
                     groupname=self._group,
                     consumername=self._consumer,
-                    streams={self._stream: ">"},
+                    streams={self._stream: "0"},
                     count=10,
-                    block=self._block_ms,
                 )
+                if not any(entries for _, entries in messages):
+                    messages = await self._redis.xreadgroup(
+                        groupname=self._group,
+                        consumername=self._consumer,
+                        streams={self._stream: ">"},
+                        count=10,
+                        block=self._block_ms,
+                    )
+                failed = False
                 for stream_name, entries in messages:
                     for msg_id, fields in entries:
                         payload = {
@@ -321,7 +343,9 @@ class RedisStreamConnector:
                             await self._on_message(payload)
                             await self._redis.xack(self._stream, self._group, msg_id)
                         except Exception:
-                            pass
+                            failed = True
+                if failed:
+                    await asyncio.sleep(1)
             except Exception:
                 await asyncio.sleep(1)
 
@@ -335,5 +359,5 @@ class RedisStreamConnector:
             except (asyncio.CancelledError, Exception):
                 pass
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
             self._redis = None
