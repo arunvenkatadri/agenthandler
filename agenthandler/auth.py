@@ -20,7 +20,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 try:
@@ -91,6 +91,7 @@ def register_oauth_routes(
     client_id: str,
     client_secret: str,
     oauth_tokens: Optional[Dict[str, Dict[str, Any]]] = None,
+    allowed_subjects: Optional[List[str]] = None,
 ) -> None:
     """Add OAuth2 login/callback routes to the FastAPI app.
 
@@ -113,6 +114,10 @@ def register_oauth_routes(
 
     if provider not in providers:
         raise ValueError(f"Unsupported OAuth provider: {provider}. Use: {list(providers.keys())}")
+
+    subjects = frozenset(subject.strip() for subject in (allowed_subjects or []) if subject.strip())
+    if not subjects:
+        raise ValueError("OAuth requires a non-empty allowed_subjects list of provider user IDs")
 
     config = providers[provider]
     sessions = oauth_tokens if oauth_tokens is not None else {}
@@ -192,6 +197,8 @@ def register_oauth_routes(
             if token_resp.status_code != 200:
                 raise HTTPException(status_code=401, detail="OAuth token exchange failed")
             token_data = token_resp.json()
+            if not isinstance(token_data, dict):
+                raise HTTPException(status_code=401, detail="Invalid OAuth token response")
             access_token = token_data.get("access_token")
             if not access_token:
                 raise HTTPException(status_code=401, detail="No access token in response")
@@ -205,11 +212,22 @@ def register_oauth_routes(
                 raise HTTPException(status_code=401, detail="Failed to fetch user info")
             user_info = user_resp.json()
 
+        # Authentication alone does not authorize access to this control plane.
+        # Both configured providers expose a stable ID in their user-info response.
+        subject = user_info.get("id") if isinstance(user_info, dict) else None
+        if (
+            isinstance(subject, bool)
+            or not isinstance(subject, (str, int))
+            or str(subject) not in subjects
+        ):
+            raise HTTPException(status_code=403, detail="OAuth user is not authorized")
+
         # Create a session token
         session_token = secrets.token_hex(32)
         sessions[session_token] = {
             "auth_type": "oauth",
             "provider": provider,
+            "subject": str(subject),
             "user": user_info.get("login") or user_info.get("email", "unknown"),
             "user_info": user_info,
             "expires_at": time.time() + 86400,  # 24 hours
