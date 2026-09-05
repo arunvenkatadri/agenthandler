@@ -341,3 +341,86 @@ async def test_full_approval_queue_returns_supervised_error():
     result = await sv.call("delete_file", delete_file)
     assert result.error.kind == "policy_denied"
     assert not result.succeeded
+
+
+@pytest.mark.asyncio
+async def test_uncopyable_approval_arguments_return_supervised_error():
+    import threading
+
+    manager = SessionManager(MemoryStore())
+    sid = manager.start("agent", POLICY_WITH_CONFIRM)
+    sv = manager.get_supervisor(sid)
+    executed = False
+
+    async def tool(handle):
+        nonlocal executed
+        executed = True
+
+    result = await sv.call("delete_file", tool, handle=threading.Lock())
+    assert not result.succeeded
+    assert result.error.kind == "policy_denied"
+    assert "Unable to queue approval" in str(result.error)
+    assert not executed
+    assert manager.approval_queue.list_pending(sid) == []
+
+
+@pytest.mark.parametrize("method", ["approve", "deny"])
+def test_failed_resolution_snapshot_leaves_request_pending(method):
+    class Fragile:
+        fail = False
+
+        def __deepcopy__(self, memo):
+            if self.fail:
+                raise TypeError("Cannot snapshot now")
+            return Fragile()
+
+    queue = ApprovalQueue()
+    request = queue.submit("tool", {"value": Fragile()}, "session")
+    Fragile.fail = True
+    with pytest.raises(TypeError):
+        getattr(queue, method)(request.approval_id)
+    Fragile.fail = False
+    restored = queue.get(request.approval_id)
+    assert restored.status == ApprovalStatus.PENDING
+    assert restored.resolved_at == ""
+
+
+def test_failed_submission_snapshot_does_not_queue_request():
+    class Fragile:
+        copies = 0
+
+        def __deepcopy__(self, memo):
+            Fragile.copies += 1
+            if Fragile.copies == 2:
+                raise TypeError("Cannot snapshot")
+            return Fragile()
+
+    queue = ApprovalQueue()
+    with pytest.raises(TypeError):
+        queue.submit("tool", {"value": Fragile()}, "session")
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_at", [1, 2])
+async def test_failed_execution_snapshot_returns_error_without_consuming(fail_at):
+    class Fragile:
+        copies = 0
+        failure = 0
+
+        def __deepcopy__(self, memo):
+            Fragile.copies += 1
+            if Fragile.copies == Fragile.failure:
+                raise TypeError("Cannot snapshot")
+            return Fragile()
+
+    manager = SessionManager(MemoryStore())
+    sid = manager.start("agent", POLICY_WITH_CONFIRM)
+    request = manager.approval_queue.submit("delete_file", {"value": Fragile()}, sid)
+    manager.approval_queue.approve(request.approval_id)
+    Fragile.copies, Fragile.failure = 0, fail_at
+    result = await manager.get_supervisor(sid).execute_approved(request.approval_id, safe_tool)
+    assert not result.succeeded
+    assert result.error.kind == "policy_denied"
+    Fragile.failure = 0
+    assert manager.approval_queue.get(request.approval_id).status == ApprovalStatus.APPROVED

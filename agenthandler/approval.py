@@ -111,6 +111,7 @@ class ApprovalQueue:
             tool_name=tool_name,
             tool_args=deepcopy(tool_args),
         )
+        snapshot = deepcopy(req)
         with self._lock:
             if len(self._requests) >= self._max_requests:
                 self._evict_resolved()
@@ -120,7 +121,7 @@ class ApprovalQueue:
                         "Resolve existing approvals before submitting new ones."
                     )
             self._requests[req.approval_id] = req
-        return deepcopy(req)
+        return snapshot
 
     def get(self, approval_id: str) -> Optional[ApprovalRequest]:
         with self._lock:
@@ -146,10 +147,11 @@ class ApprovalQueue:
             req = self._requests.get(approval_id)
             if req is None or req.status != ApprovalStatus.PENDING:
                 return None
-            req.status = ApprovalStatus.APPROVED
-            req.resolved_at = datetime.now(timezone.utc).isoformat()
-            req.resolved_by = approved_by
-            return deepcopy(req)
+            snapshot = deepcopy(req)
+            req.status = snapshot.status = ApprovalStatus.APPROVED
+            req.resolved_at = snapshot.resolved_at = datetime.now(timezone.utc).isoformat()
+            req.resolved_by = snapshot.resolved_by = approved_by
+            return snapshot
 
     def deny(
         self, approval_id: str, reason: str = "", denied_by: str = ""
@@ -159,11 +161,12 @@ class ApprovalQueue:
             req = self._requests.get(approval_id)
             if req is None or req.status != ApprovalStatus.PENDING:
                 return None
-            req.status = ApprovalStatus.DENIED
-            req.deny_reason = reason
-            req.resolved_at = datetime.now(timezone.utc).isoformat()
-            req.resolved_by = denied_by
-            return deepcopy(req)
+            snapshot = deepcopy(req)
+            req.status = snapshot.status = ApprovalStatus.DENIED
+            req.deny_reason = snapshot.deny_reason = reason
+            req.resolved_at = snapshot.resolved_at = datetime.now(timezone.utc).isoformat()
+            req.resolved_by = snapshot.resolved_by = denied_by
+            return snapshot
 
     def list_pending(self, session_id: Optional[str] = None) -> List[ApprovalRequest]:
         """List pending approvals, optionally filtered by session."""
