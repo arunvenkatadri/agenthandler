@@ -56,6 +56,7 @@ def test_authenticated_workflow_persists_verifiable_report(client, tmp_path):
         "item,quantity,unit_price\nX,-1,1",
         "item,quantity,unit_price\nX,1,NaN",
         "item,quantity,unit_price\nX,1,0.001",
+        "item,quantity,unit_price\nX,1,1e-999999999",
         "item,quantity,unit_price\nX,1,Infinity",
         "item,quantity,unit_price\n,1,1",
         "item,quantity,unit_price\nX,1",

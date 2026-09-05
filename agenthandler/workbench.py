@@ -50,9 +50,9 @@ def summarize_orders(inputs: Dict[str, Any]) -> Dict[str, Any]:
             price = Decimal(row["unit_price"])
             if not price.is_finite() or price < 0 or price > 1000000:
                 raise ValueError("Unit prices must be between 0 and 1,000,000")
-            cents = price * 100
-            if cents != cents.to_integral_value():
+            if price != price.quantize(Decimal("0.01")):
                 raise ValueError("Unit prices must have at most two decimal places")
+            cents = price * 100
             if not row["item"].strip() or quantity < 1 or quantity > 1000000:
                 raise ValueError("Each item needs a name and a positive bounded quantity")
         except (InvalidOperation, ValueError) as exc:

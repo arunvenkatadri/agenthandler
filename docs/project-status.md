@@ -3,7 +3,7 @@
 The integration branch combines the bug-scan fixes, verified completion, durable
 task execution, and the local workbench. Validation on September 5, 2026:
 
-- 916 Python tests passed, including three real Chromium/HTTP end-to-end tests.
+- 917 Python tests passed, including three real Chromium/HTTP end-to-end tests.
 - Seven dashboard JavaScript tests passed.
 - Overall Python coverage: 83.26%.
 - Ruff lint/format, strict mypy, wheel/sdist build and twine validation passed.
