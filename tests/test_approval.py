@@ -261,3 +261,83 @@ class TestApprovalREST:
         sid = resp.json()["session_id"]
         resp = client.post(f"/sessions/{sid}/approvals/fake-id/approve")
         assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_approval_is_single_use_and_does_not_authorize_concurrent_calls():
+    import asyncio
+
+    mgr = SessionManager(MemoryStore())
+    sid = mgr.start("agent", POLICY_WITH_CONFIRM)
+    sv = mgr.get_supervisor(sid)
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def tool(path):
+        calls.append(path)
+        started.set()
+        await release.wait()
+        return path
+
+    pending = await sv.call("delete_file", tool, path="approved")
+    aid = pending.error.details["approval_id"]
+    mgr.approval_queue.approve(aid)
+    first = asyncio.create_task(sv.execute_approved(aid, tool))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        replay = await sv.execute_approved(aid, tool)
+        ordinary = await sv.call("delete_file", tool, path="unapproved")
+        assert not replay.succeeded
+        assert ordinary.error.kind == "approval_pending"
+        assert sv._policy.require_confirm == POLICY_WITH_CONFIRM["require_confirm"]
+    finally:
+        release.set()
+        result = await first
+    assert result.succeeded
+    assert calls == ["approved"]
+    assert not (await sv.execute_approved(aid, tool)).succeeded
+
+
+@pytest.mark.asyncio
+async def test_approval_cannot_be_used_by_another_session():
+    mgr = SessionManager(MemoryStore())
+    first = mgr.get_supervisor(mgr.start("first", POLICY_WITH_CONFIRM))
+    second = mgr.get_supervisor(mgr.start("second", POLICY_WITH_CONFIRM))
+    pending = await first.call("delete_file", delete_file, path="original")
+    aid = pending.error.details["approval_id"]
+    mgr.approval_queue.approve(aid)
+    assert not (await second.execute_approved(aid, delete_file)).succeeded
+    assert (await first.execute_approved(aid, delete_file)).output == "Deleted original"
+
+
+def test_queue_snapshots_cannot_rewrite_approval_or_arguments():
+    queue = ApprovalQueue()
+    args = {"nested": {"path": "original"}}
+    req = queue.submit("delete_file", args, "s1")
+    args["nested"]["path"] = "changed"
+    req.status = ApprovalStatus.APPROVED
+    req.tool_args["nested"]["path"] = "changed"
+    assert queue.consume(req.approval_id, "s1") is None
+    for snapshot in [queue.get(req.approval_id), *queue.list_all(), *queue.list_pending()]:
+        snapshot.status = ApprovalStatus.APPROVED
+        snapshot.tool_args["nested"]["path"] = "changed"
+    approved = queue.approve(req.approval_id)
+    approved.tool_args["nested"]["path"] = "changed"
+    assert queue.consume(req.approval_id, "s1").tool_args == {"nested": {"path": "original"}}
+    assert queue.consume(req.approval_id, "s1") is None
+
+
+@pytest.mark.asyncio
+async def test_full_approval_queue_returns_supervised_error():
+    from agenthandler.policy import Policy
+    from agenthandler.supervisor import Supervisor
+
+    sv = Supervisor(
+        Policy(require_confirm=["delete_file"]),
+        session_id="s1",
+        approval_queue=ApprovalQueue(max_requests=1),
+    )
+    await sv.call("delete_file", delete_file)
+    result = await sv.call("delete_file", delete_file)
+    assert result.error.kind == "policy_denied"
+    assert not result.succeeded

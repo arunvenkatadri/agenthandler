@@ -151,14 +151,16 @@ class CompressedSupervisor(Supervisor):
             )
             self._compression = "off"
 
-    async def call(
+    async def _call(
         self,
         tool_name: str,
         fn: Callable[..., Coroutine[Any, Any, Any]],
-        **kwargs: Any,
+        kwargs: Dict[str, Any],
+        *,
+        confirmed: bool = False,
     ) -> SupervisedResult:
         """Call a tool with supervision and compress the output."""
-        result = await super().call(tool_name, fn, **kwargs)
+        result = await super()._call(tool_name, fn, kwargs, confirmed=confirmed)
 
         if result.succeeded and self._compression != "off":
             if self._compression == "always" or self._should_compress(result.output):
