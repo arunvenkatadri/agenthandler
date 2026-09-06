@@ -19,7 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Callable, Dict, List, Optional
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
+
+if TYPE_CHECKING:
+    from .task import DurableTaskRunner
+    from .task_api import TaskTemplate
 
 try:
     from fastapi import (
@@ -137,6 +142,8 @@ def create_app(
     require_auth: bool = False,
     tool_registry: Optional[Dict[str, Any]] = None,
     llm: Optional[Any] = None,
+    task_runner: Optional[DurableTaskRunner] = None,
+    task_templates: Sequence[TaskTemplate] = (),
 ) -> FastAPI:
     """Build a FastAPI app wired to the given SessionManager.
 
@@ -164,6 +171,14 @@ def create_app(
     oauth_provider = os.environ.get("AGENTHANDLER_OAUTH_PROVIDER")
     oauth_client_id = os.environ.get("AGENTHANDLER_OAUTH_CLIENT_ID", "")
     oauth_client_secret = os.environ.get("AGENTHANDLER_OAUTH_CLIENT_SECRET", "")
+    oauth_config = (oauth_provider, oauth_client_id, oauth_client_secret)
+    if any(oauth_config) and not all(oauth_config):
+        raise ValueError("OAuth requires provider, client ID, and client secret together")
+    oauth_allowed_subjects = [
+        value.strip()
+        for value in os.environ.get("AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS", "").split(",")
+        if value.strip()
+    ]
     oauth_enabled = bool(oauth_provider and oauth_client_id and oauth_client_secret)
 
     oauth_tokens: Dict[str, Dict[str, Any]] = {}
@@ -175,8 +190,16 @@ def create_app(
         oauth_tokens=oauth_tokens,
     )
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(scheduler.stop)
+
     app = FastAPI(
         title="AgentHandler Control Plane",
+        lifespan=lifespan,
         version="0.93.0",
         description=(
             "REST API for managing agent sessions. "
@@ -200,10 +223,23 @@ def create_app(
     app.state.manager = manager
     app.state.auth_enabled = auth_enabled
 
+    if task_runner is not None:
+        from .task_api import register_task_routes
+
+        if task_runner.manager is not manager:
+            raise ValueError("Task runner and server must share the same SessionManager")
+        register_task_routes(app, task_runner, task_templates, auth)
+        app.state.task_runner = task_runner
+
     # Register OAuth routes if configured
     if oauth_enabled and oauth_provider:
         register_oauth_routes(
-            app, oauth_provider, oauth_client_id, oauth_client_secret, oauth_tokens
+            app,
+            oauth_provider,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_tokens,
+            allowed_subjects=oauth_allowed_subjects,
         )
 
     # ------------------------------------------------------------------
@@ -545,7 +581,10 @@ def create_app(
                 raise HTTPException(status_code=400, detail="Cron expression required")
             if pipeline_fn is None:
                 raise HTTPException(status_code=400, detail="Pipeline POML required")
-            scheduler.add_cron(req.name, pipeline_fn, cron=req.cron)
+            try:
+                scheduler.add_cron(req.name, pipeline_fn, cron=req.cron)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             if not scheduler._running:
                 scheduler.start()
 
@@ -617,7 +656,7 @@ def create_app(
         """List all registered triggers."""
         triggers = scheduler.list_triggers()
         for name, wh in webhooks.items():
-            triggers.append({"name": name, "type": "webhook", "enabled": True})
+            triggers.append({"name": name, "type": "webhook", "enabled": wh.enabled})
         return triggers
 
     @app.get("/triggers/history")
@@ -635,17 +674,29 @@ def create_app(
         wh = webhooks.get(trigger_name)
         if wh is None:
             raise HTTPException(status_code=404, detail=f"Webhook '{trigger_name}' not found")
+        if not wh.enabled:
+            raise HTTPException(status_code=409, detail="Webhook is disabled")
         record = await wh.fire()
         return record.to_dict()
 
     @app.post("/triggers/{trigger_name}/enable")
     def enable_trigger(trigger_name: str, _: Any = Depends(auth)) -> Dict[str, Any]:
-        scheduler.enable(trigger_name)
+        if trigger_name in webhooks:
+            webhooks[trigger_name].enabled = True
+        elif any(t["name"] == trigger_name for t in scheduler.list_triggers()):
+            scheduler.enable(trigger_name)
+        else:
+            raise HTTPException(status_code=404, detail="Trigger not found")
         return {"name": trigger_name, "enabled": True}
 
     @app.post("/triggers/{trigger_name}/disable")
     def disable_trigger(trigger_name: str, _: Any = Depends(auth)) -> Dict[str, Any]:
-        scheduler.disable(trigger_name)
+        if trigger_name in webhooks:
+            webhooks[trigger_name].enabled = False
+        elif any(t["name"] == trigger_name for t in scheduler.list_triggers()):
+            scheduler.disable(trigger_name)
+        else:
+            raise HTTPException(status_code=404, detail="Trigger not found")
         return {"name": trigger_name, "enabled": False}
 
     @app.delete("/triggers/{trigger_name}")

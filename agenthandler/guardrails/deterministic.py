@@ -11,6 +11,7 @@ import json
 import re
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -257,12 +258,12 @@ class IdempotencyGuard:
         if tool_name not in self.tracked_tools:
             return GuardrailResult.allow(self.name)
         now = time.monotonic()
-        key = self._key(tool_name, kwargs)
+        key = str(context.get("cache_namespace", "")) + ":" + self._key(tool_name, kwargs)
         with self._lock:
             cached = self._cache.get(key)
             if cached and now - cached[0] < self.ttl_seconds:
                 return GuardrailResult.replace(
-                    cached[1],
+                    deepcopy(cached[1]),
                     reason=f"Returned cached result for {tool_name} (idempotency)",
                     guardrail_name=self.name,
                 )
@@ -273,13 +274,23 @@ class IdempotencyGuard:
     ) -> GuardrailResult:
         return self.check_pre(tool_name, kwargs, context)
 
-    def record(self, tool_name: str, kwargs: Dict[str, Any], output: Any) -> None:
+    def record(
+        self,
+        tool_name: str,
+        kwargs: Dict[str, Any],
+        output: Any,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Called after a successful tool call to cache the result."""
         if tool_name not in self.tracked_tools:
             return
-        key = self._key(tool_name, kwargs)
+        key = str((context or {}).get("cache_namespace", "")) + ":" + self._key(tool_name, kwargs)
         with self._lock:
-            self._cache[key] = (time.monotonic(), output)
+            now = time.monotonic()
+            self._cache = {k: v for k, v in self._cache.items() if now - v[0] < self.ttl_seconds}
+            if len(self._cache) >= 1000:
+                del self._cache[min(self._cache, key=lambda k: self._cache[k][0])]
+            self._cache[key] = (now, deepcopy(output))
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +411,11 @@ class UrlGuard:
     name: str = "url_guard"
 
     def _extract_urls(self, text: str) -> List[str]:
-        return re.findall(r"https?://[^\s\"'<>]+", text)
+        return re.findall(r"https?://[^\s\"'<>]+", text, re.IGNORECASE)
 
     def _domain_matches(self, domain: str, patterns: List[str]) -> bool:
         for pat in patterns:
-            if fnmatch.fnmatch(domain, pat):
+            if fnmatch.fnmatchcase(domain, pat.lower().rstrip(".")):
                 return True
         return False
 
@@ -412,18 +423,26 @@ class UrlGuard:
         self, tool_name: str, kwargs: Dict[str, Any], context: Dict[str, Any]
     ) -> GuardrailResult:
         urls: Set[str] = set()
-        for v in kwargs.values():
-            if isinstance(v, str):
-                urls.update(self._extract_urls(v))
-                # Also handle bare URLs
-                if v.startswith("http://") or v.startswith("https://"):
-                    urls.add(v)
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                urls.update(self._extract_urls(value))
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    collect(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    collect(nested)
+
+        collect(kwargs)
 
         for url in urls:
             try:
-                domain = urlparse(url).netloc.lower()
-            except Exception:
-                continue
+                domain = (urlparse(url).hostname or "").lower().rstrip(".")
+                if not domain:
+                    raise ValueError("Missing URL hostname")
+            except ValueError:
+                return GuardrailResult.block("Invalid URL", self.name)
             if self.blocklist and self._domain_matches(domain, self.blocklist):
                 return GuardrailResult.block(f"URL blocked: {domain}", self.name)
             if self.allowlist and not self._domain_matches(domain, self.allowlist):

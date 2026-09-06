@@ -37,6 +37,7 @@ import json
 # set AGENTHANDLER_POLICY_KEY env var.
 import os
 import threading
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from .approval import ApprovalQueue
@@ -44,7 +45,14 @@ from .audit import AuditLog, MemoryAuditSink
 from .errors import AgentHandlerError
 from .observe import Observer
 from .policy import Policy
-from .store import Checkpoint, SessionStatus, StateStore, new_session_id, validate_payload
+from .store import (
+    Checkpoint,
+    MemoryStore,
+    SessionStatus,
+    StateStore,
+    new_session_id,
+    validate_payload,
+)
 from .supervisor import Supervisor
 
 _POLICY_HMAC_KEY = os.environ.get(
@@ -79,7 +87,9 @@ class SessionManager:
         from .observe import PricingTable
 
         self._store = store
+        self._ephemeral_store = MemoryStore()
         self._supervisors: Dict[str, Supervisor] = {}
+        self._audit_baselines: Dict[str, List[Dict[str, Any]]] = {}
         self._audit_sinks: Dict[str, MemoryAuditSink] = {}
         self._original_policies: Dict[str, Dict[str, Any]] = {}
         self._stateless_sessions: set[str] = set()
@@ -90,6 +100,9 @@ class SessionManager:
         self._post_guardrails: List[Any] = post_guardrails or []
         self._lock = threading.Lock()  # protects the dicts above
         self._session_locks: Dict[str, threading.Lock] = {}  # per-session locks
+
+    def _session_store(self, session_id: str) -> StateStore:
+        return self._ephemeral_store if session_id in self._stateless_sessions else self._store
 
     def _get_session_lock(self, session_id: str) -> threading.Lock:
         """Get or create a per-session lock."""
@@ -131,7 +144,7 @@ class SessionManager:
             session_id for the new session.
         """
         sid = new_session_id()
-        safe_policy_dict = policy_dict or {}
+        safe_policy_dict = deepcopy(policy_dict or {})
         policy = Policy.from_dict(safe_policy_dict)
 
         # Validate payload before storing
@@ -167,12 +180,15 @@ class SessionManager:
             stateless=stateless,
             policy_checksum=checksum,
         )
-        self._store.save_checkpoint(checkpoint)
+        if stateless:
+            with self._lock:
+                self._stateless_sessions.add(sid)
+        self._session_store(sid).save_checkpoint(checkpoint)
 
         with self._lock:
             self._supervisors[sid] = sv
             self._audit_sinks[sid] = sink
-            self._original_policies[sid] = frozen_policy
+            self._original_policies[sid] = deepcopy(frozen_policy)
             if stateless:
                 self._stateless_sessions.add(sid)
 
@@ -182,13 +198,13 @@ class SessionManager:
         """Pause an agent session. The Supervisor will raise AgentPaused on next call()."""
         session_lock = self._get_session_lock(session_id)
         with session_lock:
-            cp = self._store.load_checkpoint(session_id)
+            cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
 
             cp.status = SessionStatus.PAUSED
             self._persist_audit(session_id, cp)
-            self._store.save_checkpoint(cp)
+            self._session_store(session_id).save_checkpoint(cp)
 
             with self._lock:
                 sv = self._supervisors.get(session_id)
@@ -213,7 +229,7 @@ class SessionManager:
         """
         session_lock = self._get_session_lock(session_id)
         with session_lock:
-            cp = self._store.load_checkpoint(session_id)
+            cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
 
@@ -227,18 +243,6 @@ class SessionManager:
                     f"Session {session_id} is stateless and cannot be resumed after a crash",
                 )
 
-            # Crash loop protection
-            policy = Policy.from_dict(cp.policy_dict)
-            if cp.resume_count >= policy.max_resumes:
-                cp.status = SessionStatus.FAILED
-                cp.failure_reason = (
-                    f"Crash loop: resumed {cp.resume_count} times (limit: {policy.max_resumes})"
-                )
-                self._store.save_checkpoint(cp)
-                raise AgentHandlerError.max_resumes_exceeded(
-                    session_id, cp.resume_count, policy.max_resumes
-                )
-
             # Policy integrity check — verify HMAC checksum
             with self._lock:
                 original = self._original_policies.get(session_id)
@@ -249,44 +253,67 @@ class SessionManager:
                 if not hmac.compare_digest(cp.policy_checksum, expected):
                     cp.status = SessionStatus.FAILED
                     cp.failure_reason = "Policy integrity check failed — possible tampering"
-                    self._store.save_checkpoint(cp)
+                    self._session_store(session_id).save_checkpoint(cp)
                     raise AgentHandlerError(
                         "policy_tampered",
                         f"Session {session_id}: policy checksum mismatch. "
                         "The stored policy may have been tampered with.",
                     )
 
+            # Crash loop protection
+            policy = Policy.from_dict(original)
+            if cp.resume_count >= policy.max_resumes:
+                cp.status = SessionStatus.FAILED
+                cp.failure_reason = (
+                    f"Crash loop: resumed {cp.resume_count} times (limit: {policy.max_resumes})"
+                )
+                self._session_store(session_id).save_checkpoint(cp)
+                raise AgentHandlerError.max_resumes_exceeded(
+                    session_id, cp.resume_count, policy.max_resumes
+                )
+
+            with self._lock:
+                old = self._supervisors.get(session_id)
+            if old is not None:
+                old.paused = True
+                old._store = None
+                data = old.to_checkpoint_data()
+                cp.iterations = data["iterations"]
+                cp.tokens_used = data["tokens_used"]
+                cp.circuit_breaker_states = data["circuit_breaker_states"]
+            self._persist_audit(session_id, cp)
             cp.resume_count += 1
             cp.status = SessionStatus.RUNNING
-            self._store.save_checkpoint(cp)
+            self._session_store(session_id).save_checkpoint(cp)
 
-        sink = MemoryAuditSink()
-        audit = AuditLog(session_id, sinks=[sink])
+            sink = MemoryAuditSink()
+            audit = AuditLog(session_id, sinks=[sink])
 
-        sv = Supervisor.restore_from_checkpoint(
-            cp,
-            audit=audit,
-            store=self._store,
-            policy_override=original,
-            approval_queue=self._approval_queue,
-            observer=self._observer,
-            pre_guardrails=self._pre_guardrails,
-            post_guardrails=self._post_guardrails,
-        )
-        sv.paused = False
+            sv = Supervisor.restore_from_checkpoint(
+                cp,
+                audit=audit,
+                store=None if cp.stateless else self._store,
+                policy_override=original,
+                approval_queue=self._approval_queue,
+                observer=self._observer,
+                pre_guardrails=self._pre_guardrails,
+                post_guardrails=self._post_guardrails,
+            )
+            sv.paused = False
 
-        with self._lock:
-            self._supervisors[session_id] = sv
-            self._audit_sinks[session_id] = sink
-            self._original_policies[session_id] = original
+            with self._lock:
+                self._supervisors[session_id] = sv
+                self._audit_sinks[session_id] = sink
+                self._audit_baselines[session_id] = deepcopy(cp.audit_log)
+                self._original_policies[session_id] = original
 
-        return sv
+            return sv
 
     def stop(self, session_id: str) -> None:
         """Stop an agent session. Calls supervisor.finish() and marks stopped."""
         session_lock = self._get_session_lock(session_id)
         with session_lock:
-            cp = self._store.load_checkpoint(session_id)
+            cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
 
@@ -294,6 +321,8 @@ class SessionManager:
                 sv = self._supervisors.get(session_id)
 
             if sv is not None:
+                sv.paused = True
+                sv._store = None
                 sv.finish()
 
             cp.status = SessionStatus.STOPPED
@@ -305,11 +334,15 @@ class SessionManager:
             self._persist_audit(session_id, cp)
 
             with self._lock:
-                self._supervisors.pop(session_id, None)
+                retired = self._supervisors.pop(session_id, None)
+                if retired is not None:
+                    retired.paused = True
+                    retired._store = None
                 self._audit_sinks.pop(session_id, None)
+                self._audit_baselines.pop(session_id, None)
                 self._original_policies.pop(session_id, None)
 
-            self._store.save_checkpoint(cp)
+            self._session_store(session_id).save_checkpoint(cp)
 
     def restart(self, session_id: str) -> str:
         """Restart a stopped or failed session with the same policy and agent ID.
@@ -322,15 +355,18 @@ class SessionManager:
         """
         session_lock = self._get_session_lock(session_id)
         with session_lock:
-            cp = self._store.load_checkpoint(session_id)
+            cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
 
             with self._lock:
-                self._supervisors.pop(session_id, None)
+                retired = self._supervisors.pop(session_id, None)
+                if retired is not None:
+                    retired.paused = True
+                    retired._store = None
                 self._audit_sinks.pop(session_id, None)
+                self._audit_baselines.pop(session_id, None)
                 self._original_policies.pop(session_id, None)
-                self._stateless_sessions.discard(session_id)
 
         return self.start(
             agent_id=cp.agent_id,
@@ -340,11 +376,11 @@ class SessionManager:
 
     def status(self, session_id: str) -> Optional[Checkpoint]:
         """Get the current checkpoint for a session."""
-        return self._store.load_checkpoint(session_id)
+        return self._session_store(session_id).load_checkpoint(session_id)
 
     def list_sessions(self) -> List[Checkpoint]:
         """List all sessions."""
-        return self._store.list_sessions()
+        return self._store.list_sessions() + self._ephemeral_store.list_sessions()
 
     def get_supervisor(self, session_id: str) -> Optional[Supervisor]:
         """Get the active Supervisor for a session (None if not in memory)."""
@@ -353,14 +389,18 @@ class SessionManager:
 
     def get_audit_entries(self, session_id: str) -> list[Dict[str, Any]]:
         """Get audit log entries for a session (in-memory + persisted)."""
-        cp = self._store.load_checkpoint(session_id)
+        cp = self._session_store(session_id).load_checkpoint(session_id)
         persisted = cp.audit_log if cp is not None else []
 
         with self._lock:
             sink = self._audit_sinks.get(session_id)
         in_memory = [e.to_dict() for e in sink.entries] if sink is not None else []
 
-        return persisted + in_memory
+        if sink is not None:
+            with self._lock:
+                baseline = self._audit_baselines.get(session_id, [])
+            return deepcopy(baseline) + in_memory
+        return persisted
 
     def update_payload(self, session_id: str, payload: Dict[str, Any]) -> None:
         """Update the opaque payload for a session.
@@ -370,11 +410,11 @@ class SessionManager:
         """
         session_lock = self._get_session_lock(session_id)
         with session_lock:
-            cp = self._store.load_checkpoint(session_id)
+            cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
             cp.payload = validate_payload(payload)
-            self._store.save_checkpoint(cp)
+            self._session_store(session_id).save_checkpoint(cp)
 
     def delete_expired(self, max_age_seconds: float) -> int:
         """Delete sessions older than max_age_seconds."""
@@ -388,4 +428,6 @@ class SessionManager:
         with self._lock:
             sink = self._audit_sinks.get(session_id)
         if sink is not None:
-            cp.audit_log = cp.audit_log + [e.to_dict() for e in sink.entries]
+            with self._lock:
+                baseline = self._audit_baselines.get(session_id, [])
+            cp.audit_log = deepcopy(baseline) + [e.to_dict() for e in sink.entries]

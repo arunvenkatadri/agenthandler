@@ -9,7 +9,7 @@ Each cycle is four LLM-backed phases:
 3. **Observe** — what came back, and how does it compare to what I expected?
 4. **Reflect** — did this advance the goal? Should I change approach?
 
-Every phase is a supervised call, every decision is recorded, and the
+Tool execution is supervised, every cycle is recorded, and the
 reflection output feeds into the next think step. This is what
 distinguishes "agent runs 72 hours doing useful work" from "agent runs
 in circles for 72 hours."
@@ -42,6 +42,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional
 
+from .completion import CompletionStatus, VerificationResult
 from .errors import AgentHandlerError
 from .session import SessionManager
 
@@ -90,6 +91,8 @@ class ReflectionResult:
     completed: bool = False
     final_answer: str = ""
     stopped_reason: str = ""
+    status: CompletionStatus = CompletionStatus.BLOCKED
+    verification: Optional[VerificationResult] = None
 
     @property
     def cycles_used(self) -> int:
@@ -130,6 +133,8 @@ What should you do next to make progress? Respond with ONLY JSON:
 
 If you believe the goal is achieved, set "done": true and "tool": null. \
 Include a "final_answer" field with your completed work.
+If progress is blocked, set "blocked": true, "done": false, "tool": null,
+and include a nonempty "reason". Completion claims will be checked separately.
 """
 
 
@@ -159,7 +164,8 @@ Reflect on this cycle:
 - Was it the right choice?
 - What should change for the next cycle?
 - Estimate overall progress toward the goal (0.0 to 1.0).
-- Should we stop? (only stop if goal is achieved or clearly unreachable)
+- Should we stop because progress is blocked? If the goal appears achieved,
+  continue to the next think phase to propose completion for verification.
 
 Respond with ONLY JSON:
 {{
@@ -192,6 +198,9 @@ class ReflectionLoop:
         tools: Dict mapping tool name → async callable.
         policy_dict: Policy for the underlying session.
         max_context_history: How many past cycles to show in think prompts.
+        verifier: Trusted async acceptance check. Without it, model completion
+            is only PROPOSED and result.completed remains False. LLM and verifier
+            callbacks must supply their own supervision if needed.
     """
 
     def __init__(
@@ -203,6 +212,7 @@ class ReflectionLoop:
         tools: Dict[str, ToolFn],
         policy_dict: Optional[Dict[str, Any]] = None,
         max_context_history: int = 10,
+        verifier: Optional[Callable[[ReflectionResult], Awaitable[VerificationResult]]] = None,
     ):
         self._manager = manager
         self._agent_id = agent_id
@@ -211,6 +221,7 @@ class ReflectionLoop:
         self._tools = tools
         self._policy_dict = policy_dict or {"max_iterations": 100, "tool_timeout": 60}
         self._max_history = max_context_history
+        self._verifier = verifier
 
     async def run(self, max_cycles: int = 20) -> ReflectionResult:
         """Run the reflection loop for up to max_cycles."""
@@ -254,23 +265,57 @@ class ReflectionLoop:
                 result.stopped_reason = "think_error"
                 break
 
+            if (
+                type(think.get("done")) is not bool
+                or type(think.get("blocked", False)) is not bool
+                or not isinstance(think.get("thought", ""), str)
+                or not isinstance(think.get("args", {}), dict)
+                or not isinstance(think.get("final_answer", ""), str)
+                or (think["done"] and think.get("tool") is not None)
+                or (
+                    think.get("blocked")
+                    and (
+                        think["done"]
+                        or think.get("tool") is not None
+                        or not isinstance(think.get("reason"), str)
+                        or not think.get("reason")
+                    )
+                )
+                or (
+                    not think["done"]
+                    and not think.get("blocked")
+                    and not isinstance(think.get("tool"), str)
+                )
+            ):
+                cycle.error = "Invalid think response"
+                result.cycles.append(cycle)
+                result.status = CompletionStatus.INVALID
+                result.stopped_reason = "invalid_response"
+                break
+
             cycle.thought = think.get("thought", "")
             tool_name = think.get("tool")
 
+            if think.get("blocked"):
+                cycle.should_stop = True
+                result.cycles.append(cycle)
+                result.stopped_reason = think["reason"]
+                break
+
             # Check for completion
-            if think.get("done") or tool_name is None:
+            if think["done"]:
                 final_answer = think.get("final_answer", "")
                 cycle.should_stop = True
-                cycle.reflection = "Agent determined goal was achieved."
-                cycle.goal_progress = 1.0
+                cycle.reflection = "Agent proposed completion; acceptance must be verified."
                 result.cycles.append(cycle)
-                result.completed = True
-                result.stopped_reason = "goal_achieved"
+                result.final_answer = final_answer
+                await self._verify_completion(result)
                 break
 
             if tool_name not in self._tools:
                 cycle.error = f"Unknown tool: {tool_name}"
                 result.cycles.append(cycle)
+                result.status = CompletionStatus.INVALID
                 result.stopped_reason = "unknown_tool"
                 break
 
@@ -319,11 +364,16 @@ class ReflectionLoop:
                 reflect = self._parse_json(raw)
                 cycle.reflection = reflect.get("reflection", "")
                 cycle.goal_progress = float(reflect.get("goal_progress", 0.0))
-                cycle.should_stop = bool(reflect.get("should_stop", False))
+                if type(reflect.get("should_stop")) is not bool:
+                    raise ValueError("should_stop must be a boolean")
+                cycle.should_stop = reflect["should_stop"]
                 stop_reason = reflect.get("reason", "")
             except Exception as e:
                 cycle.reflection = f"(reflection failed: {e})"
-                stop_reason = ""
+                result.cycles.append(cycle)
+                result.status = CompletionStatus.INVALID
+                result.stopped_reason = "invalid_reflection"
+                break
 
             result.cycles.append(cycle)
 
@@ -337,6 +387,29 @@ class ReflectionLoop:
         result.final_answer = final_answer
         self._manager.stop(sid)
         return result
+
+    async def _verify_completion(self, result: ReflectionResult) -> None:
+        from copy import deepcopy
+
+        result.status = CompletionStatus.PROPOSED
+        result.stopped_reason = "completion_proposed"
+        if self._verifier is None:
+            return
+        try:
+            verification = await self._verifier(deepcopy(result))
+            if not isinstance(verification, VerificationResult):
+                raise ValueError("Verifier must return VerificationResult")
+            verification.validate()
+            result.verification = verification
+        except Exception as exc:
+            result.status = CompletionStatus.INVALID
+            result.stopped_reason = f"verification_error: {exc}"
+            return
+        result.completed = verification.passed
+        result.status = (
+            CompletionStatus.VERIFIED if verification.passed else CompletionStatus.BLOCKED
+        )
+        result.stopped_reason = "goal_verified" if verification.passed else "verification_failed"
 
     def _format_history(self, cycles: List[ReflectionCycle]) -> str:
         """Format recent cycles as a compact history string for the think prompt."""
@@ -366,6 +439,6 @@ class ReflectionLoop:
                 t = t[5:]
         try:
             result: Dict[str, Any] = json.loads(t)
-            return result
+            return result if isinstance(result, dict) else {}
         except (ValueError, json.JSONDecodeError):
             return {}

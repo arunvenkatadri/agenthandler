@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentHandler · Verified workflows</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101513;color:#e8eeea;font:16px/1.6 system-ui,sans-serif}
+main{max-width:1050px;margin:auto;padding:48px 24px}h1{font-size:34px;line-height:1.2;margin:8px 0 14px}
+h2{font-size:19px;margin-top:0}.eyebrow{color:#91c9ac;font-size:13px;letter-spacing:2px;text-transform:uppercase}
+p{color:#b2bfb7}section{background:#19211d;border:1px solid #33453b;border-radius:12px;padding:24px;margin:24px 0}
+label{display:block;margin-bottom:8px}input,textarea,button{font:inherit;border-radius:6px;border:1px solid #506658}
+input,textarea{background:#111713;color:#e8eeea;padding:10px;width:100%}textarea{font-family:monospace;min-height:155px}
+button{background:#a8e6bf;color:#102719;padding:10px 18px;font-weight:600;cursor:pointer;margin:12px 8px 0 0}
+button:disabled{opacity:.45;cursor:default}#connection{color:#b2bfb7}#error{color:#ffb2a4;white-space:pre-wrap}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.pill{display:inline-block;padding:3px 10px;border:1px solid #708d7b;border-radius:20px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}#jobs button{background:#223b2d;color:#d9eee1;text-align:left;max-width:100%;overflow-wrap:anywhere}
+small{color:#b2bfb7}a{color:#a8e6bf} @media(max-width:700px){.grid{grid-template-columns:1fr}main{padding:24px 16px}}
+</style>
+<main>
+  <div class="eyebrow">AgentHandler / local workbench</div>
+  <h1>Run a workflow. Verify the result.</h1>
+  <p>This reference workflow calculates an order report, saves it to disk, and checks the saved result.
+  It runs locally without a model or paid API. Jobs and budgets survive a server restart.</p>
+  <section>
+    <h2>Connect</h2>
+    <form id="connect-form">
+      <label for="api-key">Server API key</label>
+      <input id="api-key" type="password" autocomplete="off" required>
+      <button>Connect</button> <span id="connection" role="status">Disconnected</span>
+    </form>
+    <div id="error" role="alert"></div>
+  </section>
+  <div class="grid">
+    <section>
+      <h2>Create an order report</h2>
+      <form id="report-form">
+        <label for="orders">Orders CSV</label>
+        <textarea id="orders">item,quantity,unit_price
+Notebook,2,4.50
+Pen,3,1.20</textarea>
+        <button id="run" disabled>Create and run</button>
+      </form>
+      <small>Acceptance: every order is included in the total, and the saved report matches the request.</small>
+    </section>
+    <section>
+      <h2>Saved jobs</h2>
+      <p>Open a job to inspect its evidence or resume it after an interruption.</p>
+      <div id="jobs">Connect to load saved jobs.</div>
+      <button id="refresh" disabled>Refresh jobs</button>
+    </section>
+  </div>
+  <section id="detail" hidden>
+    <h2>Job result <span class="pill" id="status"></span></h2>
+    <p id="reason"></p>
+    <p id="total"></p>
+    <small id="job-id"></small>
+    <p id="budget"></p>
+    <button id="resume">Resume job</button>
+    <button id="download" hidden>Download report</button>
+    <h3>Milestones and evidence</h3>
+    <pre id="evidence"></pre>
+  </section>
+</main>
+<script>
+'use strict';
+let key = '', current = null, busy = false;
+const el = id => document.getElementById(id);
+function error(err) { el('error').textContent = err.message || String(err); }
+async function api(path, options = {}) {
+  const response = await fetch(path, {...options, headers: {'Content-Type':'application/json', Authorization:'Bearer ' + key}});
+  const data = await response.json();
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data));
+  return data;
+}
+function show(job) {
+  current = job;
+  el('detail').hidden = false;
+  el('status').textContent = job.status;
+  el('reason').textContent = job.reason;
+  el('job-id').textContent = 'Job ' + job.task_id;
+  el('budget').textContent = 'Calls reserved: ' + job.calls_reserved + ' / ' + job.limits.max_calls + ' · Tokens reserved: ' + job.tokens_reserved;
+  el('evidence').textContent = JSON.stringify(job.milestones, null, 2);
+  el('resume').hidden = job.status === 'verified';
+  el('resume').disabled = busy;
+  const receipt = job.milestones.publish && job.milestones.publish.output;
+  el('download').hidden = job.status !== 'verified';
+  el('total').textContent = job.status === 'verified' && receipt ? 'Verified total: $' + (receipt.report.total_cents / 100).toFixed(2) : '';
+}
+async function refresh() {
+  const jobs = await api('/tasks');
+  el('jobs').replaceChildren();
+  if (!jobs.length) el('jobs').textContent = 'No jobs yet.';
+  jobs.forEach(job => {
+    const button = document.createElement('button');
+    button.textContent = job.task_id.slice(0, 8) + ' · ' + job.status;
+    button.onclick = () => show(job);
+    el('jobs').append(button);
+  });
+}
+async function run(job) {
+  busy = true; el('run').disabled = true; el('resume').disabled = true;
+  show(job); el('status').textContent = 'running';
+  try { show(await api('/tasks/' + job.task_id + '/run', {method:'POST'})); }
+  catch (err) { el('status').textContent = 'interrupted'; error(new Error(err.message + '. Reconnect and resume this saved job; do not create a replacement.')); }
+  finally { busy = false; el('run').disabled = false; el('resume').disabled = false; await refresh().catch(error); }
+}
+el('connect-form').onsubmit = async event => {
+  event.preventDefault(); key = el('api-key').value; el('error').textContent = '';
+  try { await refresh(); el('connection').textContent = 'Connected'; el('run').disabled = busy; el('refresh').disabled = false; }
+  catch (err) { el('connection').textContent = 'Disconnected'; el('run').disabled = true; el('refresh').disabled = true; error(err); }
+};
+el('report-form').onsubmit = async event => {
+  event.preventDefault(); if (busy) return; busy = true; el('error').textContent = ''; el('run').disabled = true;
+  try { const job = await api('/tasks', {method:'POST', body:JSON.stringify({template_id:'order-report', inputs:{orders:el('orders').value}})}); await run(job); }
+  catch (err) { busy = false; error(err); el('run').disabled = false; }
+};
+el('refresh').onclick = () => refresh().catch(error);
+el('resume').onclick = () => { if (current && !busy) { el('error').textContent = ''; run(current).catch(error); } };
+el('download').onclick = () => {
+  if (!current || current.status !== 'verified') return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(current.milestones.publish.output, null, 2)], {type:'application/json'}));
+  const link = document.createElement('a'); link.href = url; link.download = 'order-report.json'; link.click(); URL.revokeObjectURL(url);
+};
+</script>
+</html>

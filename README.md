@@ -11,7 +11,6 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)]()
-[![Tests](https://img.shields.io/badge/tests-658-brightgreen.svg)]()
 
 *Every agent needs a handler.*
 
@@ -44,6 +43,23 @@ AgentHandler takes a different approach. **You define skills and agents declarat
 ```bash
 pip install agenthandler
 ```
+
+## Try the complete local workflow
+
+The [workbench](docs/workbench.md) runs an authenticated order-report workflow
+from a browser through supervised execution, disk persistence, and acceptance
+verification. It also resumes interrupted jobs without repeating a saved report.
+It is deterministic and makes no paid model calls.
+
+```bash
+pip install -e '.[server]'
+export AGENTHANDLER_API_KEY='choose-a-local-server-password'
+python -m agenthandler.workbench --data-dir .agenthandler
+```
+
+Open http://127.0.0.1:8000, connect with that password, and run the supplied orders.
+The expected verified total is **$12.60**. See the guide for browser tests and
+restart/recovery checks. Run these commands from a checkout containing this feature.
 
 ## Quick start
 
@@ -86,7 +102,9 @@ asyncio.run(main())
 
 ## Dashboard
 
-Open `dashboard.html` in a browser for a full management UI:
+**Integration requirement:** the older dashboard's chat, prompt builder, and chat-based Deploy flow require a separate application backend. The stock REST server manages sessions and registered pipelines; creating a session does not itself run an agent. Use the [workbench](docs/workbench.md) for the complete local workflow shipped here.
+
+Open `dashboard.html` in a browser for the management and integration UI:
 
 - **Agents** — create, edit, deploy, and manage agents. Each agent has a system prompt, task, assigned skills, policies, budget overrides, and an optional POML pipeline. Agents persist to localStorage across refreshes.
 - **LLM-powered agent builder** — describe what you want in plain English. Claude generates a system prompt, picks the right skills and policies, sets a schedule, suggests budgets, and creates a multi-step pipeline — all auto-applied. Hit "Refine" to iterate on the prompt.
@@ -377,7 +395,7 @@ The REST endpoint `GET /pipelines/schema` returns the schema for all registered 
 
 ## Reflection loops (agents that actually think)
 
-Long-duration agents don't just loop `run()` forever. They think → act → observe → reflect → think again. Each phase is its own LLM call, each phase is audited, and the reflection output feeds into the next think phase.
+Long-duration agents don't just loop `run()` forever. They think → act → observe → reflect → think again. Think, observe, and reflect use your LLM callback; tool execution is supervised and audited. Reflections feed into the next think phase.
 
 ```python
 from agenthandler import ReflectionLoop, SessionManager, MemoryStore
@@ -399,7 +417,9 @@ for c in result.cycles:
     print(f"  {c.thought} → {c.tool_called} → {c.reflection}")
 ```
 
-Each cycle is fully supervised. Guardrails apply. Crashes are recoverable. Every reflection is in the audit log. This is what distinguishes "agent ran for 72 hours doing useful work" from "agent ran in circles for 72 hours."
+A model completion claim produces `status="proposed"` and `completed=False`. Supply a trusted async `verifier` returning `VerificationResult` to certify completion with acceptance evidence. Malformed responses are invalid; blocked work remains incomplete. Reflection history is local to this run.
+
+For restartable jobs, use the optional `DurableTaskRunner` with `SqliteTaskStore`. It persists milestone progress, operation IDs, verification evidence, and lifetime budget reservations. Uncertain external operations require reconciliation before replay. See [durable tasks and completion semantics](docs/durable-tasks.md) for the API, migration notes, and adapter requirements.
 
 See `examples/long_running_agent.py` for a full reference implementation.
 

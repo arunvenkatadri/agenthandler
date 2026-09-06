@@ -196,7 +196,7 @@ class SupervisedMCPServer:
         else:
 
             async def _async_wrap(**kwargs: Any) -> Any:
-                return original_fn(**kwargs)
+                return await asyncio.to_thread(original_fn, **kwargs)
 
             supervised_fn = _async_wrap
 

@@ -49,7 +49,7 @@ def _ensure_async(fn: Callable[..., Any]) -> Callable[..., Coroutine[Any, Any, A
 
     @functools.wraps(fn)
     async def _wrapper(**kwargs: Any) -> Any:
-        return fn(**kwargs)
+        return await asyncio.to_thread(fn, **kwargs)
 
     return _wrapper
 

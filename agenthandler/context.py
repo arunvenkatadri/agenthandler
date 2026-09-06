@@ -194,6 +194,8 @@ class ContextWindow:
         summarizer: Optional[Callable[[str], Coroutine[Any, Any, str]]] = None,
         skill_name: Optional[str] = None,
     ):
+        if max_recent_turns < 1 or max_summary_tokens < 1:
+            raise ValueError("Context window limits must be positive")
         self._supervisor = supervisor
         self._max_recent_turns = max_recent_turns
         self._max_summary_tokens = max_summary_tokens
