@@ -3,9 +3,9 @@
 The integration branch combines the bug-scan fixes, verified completion, durable
 task execution, and the local workbench. Validation on September 5, 2026:
 
-- 917 Python tests passed, including three real Chromium/HTTP end-to-end tests.
-- Seven dashboard JavaScript tests passed.
-- Overall Python coverage: 83.26%.
+- 918 Python tests passed, including three real Chromium/HTTP end-to-end tests.
+- Eight dashboard JavaScript tests passed.
+- Overall Python coverage: 83.28%.
 - Ruff lint/format, strict mypy, wheel/sdist build and twine validation passed.
 - The built wheel was installed into a separate Python 3.13 environment outside
   the source checkout; its CLI, packaged UI, and task API load successfully.

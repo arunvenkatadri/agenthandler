@@ -83,7 +83,10 @@ All milestones must pass their validators before the task is verified. For
 cross-milestone requirements or artifacts that can change over time, include a
 final milestone whose validator checks the entire delivered result. Evidence is
 a record of a check at execution time, not a promise that an external artifact
-can never change. A completed task returns its stored result without new calls.
+can never change. A completed task returns its stored result without new calls. Its underlying
+session is stopped and its in-memory supervisor released. If a process dies
+between recording completion and closing the session, resuming the completed
+task repairs that cleanup without replaying work.
 
 ## Recover uncertain operations
 

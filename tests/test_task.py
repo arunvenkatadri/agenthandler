@@ -51,6 +51,8 @@ async def test_complete_and_resume_without_replaying(tmp_path):
     assert result.completed
     assert result.next_milestone is None
     assert result.calls_reserved == 2
+    assert runner.manager.status(task.session_id).status.value == "stopped"
+    assert runner.manager.get_supervisor(task.session_id) is None
     assert (
         result.milestones["report"]["verification"]["evidence"]["checked"]["artifact"] == "report"
     )
@@ -62,6 +64,25 @@ async def test_complete_and_resume_without_replaying(tmp_path):
     replay = await fresh.run(task.task_id, [replace(steps[0], execute=never, verify=never)])
     assert replay.completed
     assert replay.calls_reserved == 2
+
+
+async def test_resume_repairs_crash_between_completion_and_session_cleanup(tmp_path, monkeypatch):
+    runner = runner_at(tmp_path)
+    step = milestone()
+    task = runner.create("agent", "Write report", [step])
+
+    def crash(session_id):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(runner.manager, "stop", crash)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(task.task_id, [step])
+    assert runner.store.load(task.task_id).completed
+    fresh = runner_at(tmp_path)
+    result = await fresh.run(task.task_id, [step])
+    assert result.completed
+    assert result.calls_reserved == 2
+    assert fresh.manager.status(task.session_id).status.value == "stopped"
 
 
 async def test_fresh_context_resumes_next_milestone_with_original_inputs(tmp_path):

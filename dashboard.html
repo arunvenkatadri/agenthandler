@@ -4227,22 +4227,22 @@ function buildRoutingYaml() {
   const lines = [];
   lines.push('version: 1');
   lines.push('revision: 1');
-  lines.push(`local_model: "${document.getElementById('rt-local-model').value}"`);
+  lines.push(`local_model: ${JSON.stringify(document.getElementById('rt-local-model').value)}`);
   lines.push('');
   lines.push('rules:');
   for (const rule of routingRules) {
-    lines.push(`- name: ${esc(rule.name)}`);
+    lines.push(`- name: ${JSON.stringify(rule.name)}`);
     const kw = rule.match.keywords_any || [];
     if (kw.length > 0) {
       lines.push('  match:');
-      lines.push(`    keywords_any: [${kw.map(k => `"${k}"`).join(', ')}]`);
+      lines.push(`    keywords_any: [${kw.map(k => JSON.stringify(k)).join(', ')}]`);
     } else {
       lines.push('  match: {}');
     }
-    lines.push(`  route: ${rule.route}`);
-    if (rule.model) lines.push(`  model: "${rule.model}"`);
-    if (rule.escalation) lines.push(`  escalation: ${rule.escalation}`);
-    if (rule.workflow) lines.push(`  workflow: ${rule.workflow}`);
+    lines.push(`  route: ${JSON.stringify(rule.route)}`);
+    if (rule.model) lines.push(`  model: ${JSON.stringify(rule.model)}`);
+    if (rule.escalation) lines.push(`  escalation: ${JSON.stringify(rule.escalation)}`);
+    if (rule.workflow) lines.push(`  workflow: ${JSON.stringify(rule.workflow)}`);
     lines.push('');
   }
   lines.push('escalation:');
@@ -4254,11 +4254,11 @@ function buildRoutingYaml() {
   lines.push(`  max_cloud_tokens: ${document.getElementById('rt-max-tokens').value}`);
   lines.push('');
   lines.push('cloud:');
-  lines.push(`  model: "${document.getElementById('rt-cloud-model').value}"`);
+  lines.push(`  model: ${JSON.stringify(document.getElementById('rt-cloud-model').value)}`);
   lines.push('');
   lines.push('local:');
-  lines.push(`  base_url: "${document.getElementById('rt-local-url').value}"`);
-  lines.push(`  model: "${document.getElementById('rt-local-model').value}"`);
+  lines.push(`  base_url: ${JSON.stringify(document.getElementById('rt-local-url').value)}`);
+  lines.push(`  model: ${JSON.stringify(document.getElementById('rt-local-model').value)}`);
   const compression = document.getElementById('rt-compression').value;
   if (compression !== 'off') {
     lines.push('');

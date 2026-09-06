@@ -276,6 +276,7 @@ class DurableTaskRunner:
                     "Task specification changed; resume requires the original contract"
                 )
             if record.completed:
+                self._close_session(record)
                 return record
             try:
                 checkpoint = self.manager.status(record.session_id)
@@ -358,7 +359,16 @@ class DurableTaskRunner:
                 record.status = CompletionStatus.BLOCKED
                 record.reason = str(exc)
             self.store._save(record)
+            if record.completed:
+                self._close_session(record)
             return record
+
+    def _close_session(self, record: TaskRecord) -> None:
+        # Persist task completion first. A crash before session cleanup can then
+        # be repaired on resume without replaying any actions or verification.
+        checkpoint = self.manager.status(record.session_id)
+        if checkpoint is not None and checkpoint.status != SessionStatus.STOPPED:
+            self.manager.stop(record.session_id)
 
     async def _call(
         self,

@@ -37,6 +37,8 @@ def test_authenticated_workflow_persists_verifiable_report(client, tmp_path):
     result = client.post(f"/tasks/{task_id}/run", headers=AUTH).json()
     assert result["status"] == "verified"
     assert result["calls_reserved"] == 4
+    session = client.get(f"/sessions/{task['session_id']}", headers=AUTH).json()
+    assert session["status"] == "stopped"
     assert result["tokens_reserved"] == result["cost_reserved_microusd"] == 0
     assert result["milestones"]["publish"]["output"]["report"]["total_cents"] == 1260
     assert len(list((tmp_path / "reports").glob("*.json"))) == 1

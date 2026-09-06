@@ -107,3 +107,24 @@ test('unavailable cost data is reported and stale totals are cleared', async () 
   assert.match(elements['cost-totals'].textContent, /unavailable/);
   assert.equal(elements['cost-by-agent'].textContent, '');
 });
+
+
+test('routing YAML preserves names and quotes all string values as YAML scalars', () => {
+  const value = 'R&D <routing> "quoted"\nsecond line';
+  const elements = Object.fromEntries(['rt-local-model', 'rt-cloud-model', 'rt-local-url']
+    .map(id => [id, {value}]));
+  Object.assign(elements, {'rt-esc-threshold': {value:'0.8'}, 'rt-esc-max': {value:'5'},
+    'rt-max-tokens': {value:'1000'}, 'rt-compression': {value:'off'}});
+  const ctx = context({routingRules:[{name:value, route:'workflow', model:value,
+    escalation:value, workflow:value, match:{keywords_any:[value]}}],
+    document:{getElementById: id => elements[id]}});
+  vm.runInContext(declaration('buildRoutingYaml'), ctx);
+  const output = ctx.buildRoutingYaml();
+  for (const key of ['name', 'model', 'workflow', 'local_model', 'base_url']) {
+    const line = output.split('\n').find(line => line.trim().replace(/^- /, '').startsWith(key + ': '));
+    assert.equal(JSON.parse(line.slice(line.indexOf(': ') + 2)), value);
+  }
+  const keywords = output.split('\n').find(line => line.includes('keywords_any:'));
+  assert.deepEqual(JSON.parse(keywords.slice(keywords.indexOf(': ') + 2)), [value]);
+  assert.ok(!output.includes('&amp;'));
+});
