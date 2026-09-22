@@ -464,3 +464,50 @@ async def test_fresh_attempt_cannot_replenish_persistent_budget(tmp_path):
     assert retry.reason == "Task budget exhausted"
     assert retry.calls_reserved == 2
     assert sv.budget().iterations == 2
+
+
+async def test_pre_execution_denial_can_retry_without_reconciliation(tmp_path):
+    from agenthandler import GuardrailResult
+
+    class Guard:
+        name = "external_readiness"
+        allowed = False
+
+        def check(self, tool_name, kwargs, context):
+            return GuardrailResult(self.allowed, "Resource not ready", self.name)
+
+    guard = Guard()
+    runner = DurableTaskRunner(
+        SessionManager(SqliteStore(str(tmp_path / "sessions.db")), pre_guardrails=[guard]),
+        SqliteTaskStore(str(tmp_path / "tasks.db")),
+    )
+    effects = []
+
+    async def execute(ctx):
+        effects.append(ctx.operation_id)
+        return await action(ctx)
+
+    step = replace(milestone(), execute=execute)
+    task = runner.create("agent", "Write report", [step])
+    blocked = await runner.run(task.task_id, [step])
+    assert not blocked.completed
+    assert effects == []
+    assert blocked.calls_reserved == 1
+    assert runner.store.load(task.task_id).milestones["report"]["state"] == "ready"
+    guard.allowed = True
+    result = await runner.run(task.task_id, [step])
+    assert result.completed
+    assert len(effects) == 1
+    assert result.calls_reserved == 3
+
+
+async def test_iteration_denial_keeps_ready_and_preserves_reservations(tmp_path):
+    runner = runner_at(tmp_path)
+    step = milestone()
+    task = runner.create("agent", "Write report", [step], policy_dict={"max_iterations": 0})
+    for attempts in (1, 2):
+        result = await runner.run(task.task_id, [step])
+        assert not result.completed
+        assert result.calls_reserved == attempts
+        assert result.milestones["report"]["state"] == "ready"
+        assert "reconciliation" not in result.reason

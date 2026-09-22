@@ -419,6 +419,12 @@ class DurableTaskRunner:
             )
         finally:
             active = False
+            if phase == "execute" and not invoked:
+                # A policy denial is known not to have executed. Keep its
+                # reservation, but do not demand external reconciliation on
+                # retry. Deferred callbacks are disabled by `active` above.
+                state["state"] = "ready"
+                self.store._save(record)
         if not result.succeeded or not returned:
             reason = result.error.user_message() if result.error else "Callback did not execute"
             raise _Blocked(reason)
