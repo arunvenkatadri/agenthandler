@@ -413,3 +413,34 @@ def test_sqlite_atomic_update_is_fenced_by_concurrent_control_transaction(tmp_pa
     assert saved.status == SessionStatus.RUNNING
     assert saved.resume_count == 1
     assert saved.tokens_used == 10
+
+
+def test_parallel_sqlite_initializers_upgrade_one_legacy_database(tmp_path):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agenthandler.store import _CREATE_TABLE
+
+    path = str(tmp_path / "legacy-parallel.db")
+    with sqlite3.connect(path) as connection:
+        connection.execute(_CREATE_TABLE)
+        connection.execute(
+            "INSERT INTO checkpoints(session_id, agent_id, status, timestamp) "
+            "VALUES ('existing', 'agent', 'paused', 'original')"
+        )
+    barrier = Barrier(8)
+
+    def initialize(_):
+        barrier.wait(timeout=5)
+        store = SqliteStore(path)
+        return store.load_checkpoint("existing")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        records = list(pool.map(initialize, range(8)))
+    assert all(record.status == SessionStatus.PAUSED for record in records)
+    assert all(record.resume_count == 0 and record.policy_checksum == "" for record in records)
+    assert all(record.timestamp == "original" for record in records)
+    with sqlite3.connect(path) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(checkpoints)")]
+    assert len(columns) == len(set(columns)) == 17

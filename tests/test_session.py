@@ -672,30 +672,74 @@ async def test_external_manager_control_fences_inflight_supervisor_checkpoint(tm
     assert (await old.call("again", good_tool)).error.kind == "agent_paused"
 
 
-def test_custom_store_without_atomic_capability_never_gets_unsafe_checkpoint_replacement():
-    class LegacyStore:
-        def __init__(self):
-            self.inner = MemoryStore()
-            self.saves = 0
+class LegacyStore:
+    def __init__(self, inner=None):
+        self.inner = inner or MemoryStore()
+        self.saves = 0
 
-        def save_checkpoint(self, checkpoint):
-            self.saves += 1
-            self.inner.save_checkpoint(checkpoint)
+    def save_checkpoint(self, checkpoint):
+        self.saves += 1
+        self.inner.save_checkpoint(checkpoint)
 
-        def load_checkpoint(self, session_id):
-            return self.inner.load_checkpoint(session_id)
+    def load_checkpoint(self, session_id):
+        return self.inner.load_checkpoint(session_id)
 
-        def list_sessions(self):
-            return self.inner.list_sessions()
+    def list_sessions(self):
+        return self.inner.list_sessions()
 
-        def delete_session(self, session_id):
-            return self.inner.delete_session(session_id)
+    def delete_session(self, session_id):
+        return self.inner.delete_session(session_id)
 
+
+def test_legacy_store_rejects_persistent_start_before_creating_anything(monkeypatch):
+    def unexpected_id():
+        pytest.fail("Unsupported persistence must be rejected before allocating a session")
+
+    monkeypatch.setattr("agenthandler.session.new_session_id", unexpected_id)
     store = LegacyStore()
     manager = SessionManager(store)
-    sid = manager.start("agent", POLICY)
+    with pytest.raises(ValueError, match="AtomicCheckpointStore"):
+        manager.start("agent", POLICY)
+    assert store.saves == 0
+    assert store.list_sessions() == []
+    assert manager._supervisors == {}
+
+
+def test_legacy_store_rejects_persistent_resume_without_mutating_checkpoint():
+    inner = MemoryStore()
+    owner = SessionManager(inner)
+    sid = owner.start("agent", POLICY)
+    original = owner.status(sid)
+    store = LegacyStore(inner)
+    fresh = SessionManager(store)
+    with pytest.raises(ValueError, match="AtomicCheckpointStore"):
+        fresh.resume(sid)
+    assert store.saves == 0
+    assert fresh.status(sid) == original
+    assert fresh.get_supervisor(sid) is None
+
+
+async def test_legacy_store_still_supports_explicit_stateless_sessions():
+    store = LegacyStore()
+    manager = SessionManager(store)
+    sid = manager.start("agent", POLICY, stateless=True)
     supervisor = manager.get_supervisor(sid)
-    assert not supervisor.supports_atomic_checkpoints
     supervisor.record_tokens(1)
-    assert store.saves == 1
-    assert manager.status(sid).tokens_used == 0
+    manager.pause(sid)
+    resumed = manager.resume(sid)
+    assert resumed.budget().tokens_used == 1
+    assert (await resumed.call("search", good_tool)).succeeded
+    manager.stop(sid)
+    assert manager.status(sid).status == SessionStatus.STOPPED
+    assert store.saves == 0
+    assert store.list_sessions() == []
+
+
+def test_direct_supervisor_rejects_legacy_store_without_unsafe_persistence():
+    from agenthandler import Policy, Supervisor
+
+    store = LegacyStore()
+    with pytest.raises(ValueError, match="atomic"):
+        Supervisor(Policy(), store=store, session_id="legacy")
+    assert store.saves == 0
+    assert store.list_sessions() == []

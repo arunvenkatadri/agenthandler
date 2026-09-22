@@ -193,3 +193,20 @@ async def test_noncopyable_tool_output_cannot_prevent_independent_verification(t
     assert result.cycles[0].thought != "mutated"
     if kind == "json":
         assert output == {"items": [{"count": 1}]}
+
+
+async def test_reflection_detaches_retained_verifier_evidence():
+    evidence = {"artifact": {"digest": "checked", "tests": ["passed"]}}
+    accepted = VerificationResult(True, evidence, "Checked artifact")
+
+    async def verify(proposal):
+        return accepted
+
+    result = await run_claim('{"done": true, "final_answer": "artifact.txt"}', verify)
+    evidence["artifact"]["tests"].clear()
+    evidence["artifact"]["digest"] = "changed"
+    evidence.clear()
+    assert result.completed
+    assert result.verification is not accepted
+    assert result.verification.evidence == {"artifact": {"digest": "checked", "tests": ["passed"]}}
+    result.verification.validate()

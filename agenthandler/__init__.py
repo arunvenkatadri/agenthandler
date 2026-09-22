@@ -65,6 +65,7 @@ from .sdk_adapters import (
 from .session import SessionManager
 from .skill import Skill, SkillStore, ToolDefinition, ToolParameter
 from .store import (
+    AtomicCheckpointStore,
     Checkpoint,
     MemoryStore,
     SessionStatus,
@@ -168,6 +169,7 @@ __all__ = [
     "to_openclaw_tool_schema",
     "to_openclaw_manifest",
     "StateStore",
+    "AtomicCheckpointStore",
     "MemoryStore",
     "SqliteStore",
     "Checkpoint",

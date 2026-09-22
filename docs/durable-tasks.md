@@ -157,6 +157,28 @@ the worker lock without undoing reservations. Keep both files on a local disk;
 do not delete or replace either database while workers are active. Use separate
 stores when independent jobs need concurrent execution.
 
+## Custom session stores and schema upgrades
+
+Persistent `SessionManager.start()` and `resume()` require the
+`AtomicCheckpointStore` capability (exported from `agenthandler`).
+A legacy `StateStore` is rejected before creating a persistent session or
+modifying a resumed checkpoint. Explicit `stateless=True` sessions remain
+available with legacy stores; they provide no crash recovery. Direct
+`Supervisor(store=...)` construction also rejects stores without this capability;
+omit `store` for explicit in-memory execution.
+
+Custom stores must implement
+`update_supervisor_checkpoint(checkpoint, *, expected_resume_count) -> bool` as
+an atomic conditional update: change only statistics and timestamp when the
+stored session is running in the expected resume generation. Never create a
+missing session, reset counters, or overwrite lifecycle, policy, payload, or
+security metadata. Return false when a newer generation or operator control has
+fenced the writer. `MemoryStore` and `SqliteStore` implement this contract.
+
+`SqliteStore` serializes schema creation, inspection, and upgrades in one write
+transaction, so workers may initialize the same database concurrently without
+racing to add the same columns.
+
 ## Validation
 
 Run `pytest tests/test_completion.py tests/test_task.py`. The tests use fake

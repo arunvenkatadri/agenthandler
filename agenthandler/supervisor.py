@@ -79,6 +79,14 @@ class Supervisor:
         pre_guardrails: Optional[List[Any]] = None,
         post_guardrails: Optional[List[Any]] = None,
     ):
+        from .store import AtomicCheckpointStore
+
+        if store is not None and not isinstance(store, AtomicCheckpointStore):
+            raise ValueError(
+                "Supervisor persistence requires atomic checkpoint support "
+                "(AtomicCheckpointStore); implement update_supervisor_checkpoint "
+                "or omit store for in-memory execution"
+            )
         self._policy = policy
         self._budget = BudgetTracker.from_policy(policy)
         self._circuit_breakers: Dict[str, CircuitBreaker] = {}

@@ -640,8 +640,6 @@ async def test_durable_runner_rejects_non_atomic_custom_store(tmp_path):
         SessionManager(LegacyStore()), SqliteTaskStore(str(tmp_path / "tasks.db"))
     )
     steps = [milestone()]
-    task = runner.create("agent", "Write report", steps)
-    result = await runner.run(task.task_id, steps)
-    assert result.status == "blocked"
-    assert result.calls_reserved == 0
-    assert result.milestones["report"]["state"] == "ready"
+    with pytest.raises(ValueError, match="atomic"):
+        runner.create("agent", "Write report", steps)
+    assert runner.manager.list_sessions() == []

@@ -46,6 +46,7 @@ from .errors import AgentHandlerError
 from .observe import Observer
 from .policy import Policy
 from .store import (
+    AtomicCheckpointStore,
     Checkpoint,
     MemoryStore,
     SessionStatus,
@@ -142,7 +143,17 @@ class SessionManager:
 
         Returns:
             session_id for the new session.
+
+        Raises:
+            ValueError: A persistent session requires AtomicCheckpointStore so
+                tool checkpoints cannot silently discard lifetime budgets or
+                overwrite control state. Legacy stores support stateless=True.
         """
+        if not stateless and not isinstance(self._store, AtomicCheckpointStore):
+            raise ValueError(
+                "Persistent sessions require atomic checkpoints (AtomicCheckpointStore); "
+                "implement update_supervisor_checkpoint or use stateless=True"
+            )
         sid = new_session_id()
         safe_policy_dict = deepcopy(policy_dict or {})
         policy = Policy.from_dict(safe_policy_dict)
@@ -232,6 +243,12 @@ class SessionManager:
             cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
+
+            if not cp.stateless and not isinstance(self._store, AtomicCheckpointStore):
+                raise ValueError(
+                    "Persistent sessions require atomic checkpoints (AtomicCheckpointStore); "
+                    "implement update_supervisor_checkpoint before resuming"
+                )
 
             # Stateless sessions can be unpaused (supervisor still in memory)
             # but cannot be recovered after a crash

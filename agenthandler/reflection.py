@@ -443,6 +443,14 @@ class ReflectionLoop:
             if not isinstance(verification, VerificationResult):
                 raise ValueError("Verifier must return VerificationResult")
             verification.validate()
+            # Capture the evidence that was accepted, detached from any object
+            # retained by the validator or its background work.
+            verification = VerificationResult(
+                verification.passed,
+                json.loads(json.dumps(verification.evidence, allow_nan=False)),
+                verification.reason,
+            )
+            verification.validate()
             result.verification = verification
         except Exception as exc:
             result.status = CompletionStatus.INVALID

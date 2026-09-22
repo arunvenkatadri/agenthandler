@@ -283,6 +283,9 @@ class SqliteStore:
             os.close(fd)
 
         with self._connect() as conn:
+            # Serialize schema inspection and migration across processes and
+            # independent store instances, not merely this instance's lock.
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(_CREATE_TABLE)
             # Run migrations for existing databases
             columns = {row[1] for row in conn.execute("PRAGMA table_info(checkpoints)")}
