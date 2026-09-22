@@ -1439,3 +1439,11 @@ mypy agenthandler/
 ## License
 
 Apache 2.0
+
+### Independent acceptance checks
+
+Use `VerificationGate` to require named application validators before treating an
+agent proposal as verified. Missing validators, empty evidence, rejected checks,
+exceptions, and timeouts cannot produce success. Every attempt executes fresh
+checks. See [verification gates](docs/verification-gates.md) for artifact binding,
+restart handling, and an independent regression-test example.

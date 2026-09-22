@@ -24,6 +24,7 @@ from .audit import AuditEntry, AuditLog, AuditOutcome, AuditPhase, AuditSink, Js
 from .budget import BudgetSnapshot, BudgetTracker
 from .builder import SkillBuilder
 from .circuit_breaker import CircuitBreaker, CircuitState
+from .completion import CompletionStatus, VerificationResult
 from .connectors import MongoConnector, SqlConnector
 from .context import AnchoredState, CompressedContext, CompressedHistory, ContextWindow, Turn
 from .errors import AgentHandlerError
@@ -79,6 +80,12 @@ from .streams import (
 )
 from .supervisor import SupervisedResult, Supervisor
 from .triggers import DbWatchEntry, Scheduler, WebhookTrigger
+from .verification import (
+    VerificationGate,
+    VerificationReport,
+    VerificationStageResult,
+    VerificationStatus,
+)
 
 try:
     from .mcp_server import SupervisedMCPServer
@@ -103,6 +110,12 @@ except ImportError:
     pass
 
 __all__ = [
+    "CompletionStatus",
+    "VerificationResult",
+    "VerificationGate",
+    "VerificationReport",
+    "VerificationStageResult",
+    "VerificationStatus",
     "Policy",
     "OnFailure",
     "Action",
