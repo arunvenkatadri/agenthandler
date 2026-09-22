@@ -129,6 +129,13 @@ callbacks and before accepting verification. A stop or pause does not forcibly
 interrupt an already-running callback; its known action output is retained, but
 later phases and verified completion are blocked. Resuming replaces the session
 generation, so an older in-flight worker cannot certify the resumed job.
+Milestone acceptance and final completion hold the session transaction until the
+task record is committed. Operator controls either take effect before that guard
+and block acceptance, or follow the committed completion. This ordering spans
+processes using the same SQLite session database; a crash after the task commit
+still leaves a completed task whose session cleanup can be repaired on restart.
+Completion records the accepted session generation; cleanup cannot stop a newer
+generation that an operator authorized after the completion commit.
 
 Durable execution requires a store with atomic, generation-checked supervisor
 updates (`update_supervisor_checkpoint`); the built-in `MemoryStore` and
@@ -153,7 +160,7 @@ stays in adapters, outside the dependency-free core.
 `SqliteTaskStore` allows one active runner per store, across threads/processes.
 A second worker gets `TaskBusyError`. A separate SQLite worker-lock database
 holds the lock while the task database commits progress. Process death releases
-the worker lock without undoing reservations. Keep both files on a local disk;
+the worker lock without undoing reservations. Keep the session and task databases in distinct files on a local disk;
 do not delete or replace either database while workers are active. Use separate
 stores when independent jobs need concurrent execution.
 
@@ -170,10 +177,16 @@ omit `store` for explicit in-memory execution.
 Custom stores must implement
 `update_supervisor_checkpoint(checkpoint, *, expected_resume_count) -> bool` as
 an atomic conditional update: change only statistics and timestamp when the
-stored session is running in the expected resume generation. Never create a
+stored session is running or paused in the expected resume generation. Paused
+sessions must retain token usage reported by an already-running callback. Never create a
 missing session, reset counters, or overwrite lifecycle, policy, payload, or
 security metadata. Return false when a newer generation or operator control has
-fenced the writer. `MemoryStore` and `SqliteStore` implement this contract.
+fenced the writer. Stores must also provide `session_transaction()`, a reentrant
+context manager that serializes session reads and writes across all controllers.
+Nested operations must participate in the same transaction without prematurely
+committing it. `MemoryStore` and `SqliteStore` implement this contract. Session
+controls and generation changes use it, and `SessionManager.running_guard()` holds
+it through durable acceptance commits.
 
 `SqliteStore` serializes schema creation, inspection, and upgrades in one write
 transaction, so workers may initialize the same database concurrently without

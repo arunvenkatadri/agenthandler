@@ -37,8 +37,9 @@ import json
 # set AGENTHANDLER_POLICY_KEY env var.
 import os
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any, ContextManager, Dict, Iterator, List, Optional
 
 from .approval import ApprovalQueue
 from .audit import AuditLog, MemoryAuditSink
@@ -100,16 +101,39 @@ class SessionManager:
         self._pre_guardrails: List[Any] = pre_guardrails or []
         self._post_guardrails: List[Any] = post_guardrails or []
         self._lock = threading.Lock()  # protects the dicts above
-        self._session_locks: Dict[str, threading.Lock] = {}  # per-session locks
+        self._session_locks: Dict[str, threading.RLock] = {}  # per-session locks
 
     def _session_store(self, session_id: str) -> StateStore:
         return self._ephemeral_store if session_id in self._stateless_sessions else self._store
 
-    def _get_session_lock(self, session_id: str) -> threading.Lock:
+    def _state_transaction(self, session_id: str) -> ContextManager[None]:
+        store = self._session_store(session_id)
+        if not isinstance(store, AtomicCheckpointStore):
+            raise ValueError(
+                "Session control requires atomic checkpoint transactions (AtomicCheckpointStore)"
+            )
+        return store.session_transaction()
+
+    @contextmanager
+    def _resume_state_transaction(self, session_id: str) -> Iterator[None]:
+        # These two rejections deliberately persist FAILED for operator visibility.
+        # Commit that state before surfacing the error; other failures roll back.
+        deferred: Optional[AgentHandlerError] = None
+        with self._state_transaction(session_id):
+            try:
+                yield
+            except AgentHandlerError as exc:
+                if exc.kind not in {"policy_tampered", "max_resumes_exceeded"}:
+                    raise
+                deferred = exc
+        if deferred is not None:
+            raise deferred
+
+    def _get_session_lock(self, session_id: str) -> threading.RLock:
         """Get or create a per-session lock."""
         with self._lock:
             if session_id not in self._session_locks:
-                self._session_locks[session_id] = threading.Lock()
+                self._session_locks[session_id] = threading.RLock()
             return self._session_locks[session_id]
 
     @property
@@ -208,7 +232,7 @@ class SessionManager:
     def pause(self, session_id: str) -> None:
         """Pause an agent session. The Supervisor will raise AgentPaused on next call()."""
         session_lock = self._get_session_lock(session_id)
-        with session_lock:
+        with session_lock, self._state_transaction(session_id):
             cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
@@ -239,7 +263,7 @@ class SessionManager:
             The restored Supervisor, ready for use.
         """
         session_lock = self._get_session_lock(session_id)
-        with session_lock:
+        with session_lock, self._resume_state_transaction(session_id):
             cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
@@ -330,7 +354,7 @@ class SessionManager:
     def stop(self, session_id: str) -> None:
         """Stop an agent session. Calls supervisor.finish() and marks stopped."""
         session_lock = self._get_session_lock(session_id)
-        with session_lock:
+        with session_lock, self._state_transaction(session_id):
             cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
@@ -362,6 +386,17 @@ class SessionManager:
 
             self._session_store(session_id).save_checkpoint(cp)
 
+    def stop_if_generation(self, session_id: str, expected_resume_count: int) -> None:
+        """Close completed work without stopping a newly authorized generation."""
+        with self._get_session_lock(session_id), self._state_transaction(session_id):
+            checkpoint = self.status(session_id)
+            if (
+                checkpoint is not None
+                and checkpoint.resume_count == expected_resume_count
+                and checkpoint.status != SessionStatus.STOPPED
+            ):
+                self.stop(session_id)
+
     def restart(self, session_id: str) -> str:
         """Restart a stopped or failed session with the same policy and agent ID.
 
@@ -372,7 +407,7 @@ class SessionManager:
             The new session_id.
         """
         session_lock = self._get_session_lock(session_id)
-        with session_lock:
+        with session_lock, self._state_transaction(session_id):
             cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)
@@ -405,6 +440,27 @@ class SessionManager:
         with self._lock:
             return self._supervisors.get(session_id)
 
+    @contextmanager
+    def running_guard(self, session_id: str, supervisor: Supervisor) -> Iterator[None]:
+        """Hold authorization stable while committing synchronous task state.
+
+        No await or external work belongs inside this guard. Store transactions
+        serialize the commit with pause, stop, and resume from other managers.
+        """
+        with self._get_session_lock(session_id), self._state_transaction(session_id):
+            checkpoint = self.status(session_id)
+            if (
+                checkpoint is None
+                or checkpoint.status != SessionStatus.RUNNING
+                or checkpoint.resume_count != supervisor.resume_count
+                or supervisor.paused
+                or self.get_supervisor(session_id) is not supervisor
+            ):
+                raise AgentHandlerError(
+                    "session_not_running", "Session is not running in this supervisor generation"
+                )
+            yield
+
     def get_audit_entries(self, session_id: str) -> list[Dict[str, Any]]:
         """Get audit log entries for a session (in-memory + persisted)."""
         cp = self._session_store(session_id).load_checkpoint(session_id)
@@ -427,7 +483,7 @@ class SessionManager:
         Treat payload as UNTRUSTED — it may contain agent-controlled data.
         """
         session_lock = self._get_session_lock(session_id)
-        with session_lock:
+        with session_lock, self._state_transaction(session_id):
             cp = self._session_store(session_id).load_checkpoint(session_id)
             if cp is None:
                 raise AgentHandlerError.session_not_found(session_id)

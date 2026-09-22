@@ -169,9 +169,12 @@ class Supervisor:
 
     def record_tokens(self, tokens: int) -> int:
         """Record token usage. Returns new total. Raises AgentHandlerError if over budget."""
-        total = self._budget.record_tokens(tokens)
-        self._auto_checkpoint()
-        return total
+        try:
+            return self._budget.record_tokens(tokens)
+        finally:
+            # BudgetTracker charges before raising an over-limit error. Preserve
+            # that usage too, including late responses after operator pause.
+            self._auto_checkpoint()
 
     def record_iteration(self) -> int:
         """Record an iteration of the agent loop. Returns iteration count.
@@ -185,7 +188,6 @@ class Supervisor:
                 AuditOutcome.ALLOWED,
                 detail=f"Iteration {count} / {self._policy.max_iterations}",
             )
-            self._auto_checkpoint()
             return count
         except AgentHandlerError as e:
             self._audit.record(
@@ -194,6 +196,8 @@ class Supervisor:
                 detail=str(e),
             )
             raise
+        finally:
+            self._auto_checkpoint()
 
     def circuit_breaker_states(self) -> Dict[str, str]:
         """Get current circuit breaker states for all tracked tools."""
@@ -240,7 +244,31 @@ class Supervisor:
             raise AgentHandlerError.dead_man_switch(int(silence * 1000))
 
     def _check_paused(self) -> None:
-        """Check if this supervisor is paused."""
+        """Fence stale generations and persisted operator controls before work."""
+        if self._store is not None and self._session_id is not None:
+            from .store import SessionStatus
+
+            try:
+                checkpoint = self._store.load_checkpoint(self._session_id)
+            except Exception as exc:
+                raise AgentHandlerError(
+                    "checkpoint_unavailable", "Cannot verify persisted session authorization"
+                ) from exc
+            same_generation = (
+                checkpoint is not None and checkpoint.resume_count == self._resume_count
+            )
+            if (
+                checkpoint is None
+                or not same_generation
+                or checkpoint.status != SessionStatus.RUNNING
+            ):
+                self._paused = True
+                if (
+                    checkpoint is None
+                    or not same_generation
+                    or checkpoint.status != SessionStatus.PAUSED
+                ):
+                    self._store = None
         if self._paused and self._session_id:
             raise AgentHandlerError.agent_paused(self._session_id)
 
@@ -889,7 +917,7 @@ class Supervisor:
         self._last_call_meta = {"input_tokens": 0, "output_tokens": 0, "model": ""}
 
     def _auto_checkpoint(self) -> None:
-        """Atomically persist statistics for this running resume generation.
+        """Atomically persist statistics for this running or paused resume generation.
 
         Lifecycle state and other application metadata belong to SessionManager.
         Custom stores without AtomicCheckpointStore cannot safely auto-checkpoint;
@@ -899,7 +927,7 @@ class Supervisor:
         from .store import AtomicCheckpointStore, Checkpoint, SessionStatus
 
         store = self._store
-        if self._session_id is None or self._paused or not isinstance(store, AtomicCheckpointStore):
+        if self._session_id is None or not isinstance(store, AtomicCheckpointStore):
             return
         data = self.to_checkpoint_data()
         cp = Checkpoint(
@@ -913,9 +941,13 @@ class Supervisor:
         )
         try:
             if not store.update_supervisor_checkpoint(cp, expected_resume_count=self._resume_count):
-                # Another manager stopped, paused, deleted, or resumed this
+                # Another manager stopped, deleted, or resumed this
                 # session. Retire the stale in-memory writer immediately.
                 self._paused = True
                 self._store = None
+            else:
+                # Preserve PAUSED writers for late usage accounting while
+                # ensuring they cannot begin another tool call.
+                self._check_paused()
         except Exception:
             pass  # checkpoint must never crash the request

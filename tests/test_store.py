@@ -365,7 +365,6 @@ class TestAtomicSupervisorCheckpoints:
             update = Checkpoint("session", "agent", SessionStatus.RUNNING, tokens_used=999)
             assert not store.update_supervisor_checkpoint(update, expected_resume_count=0)
             for status in (
-                SessionStatus.PAUSED,
                 SessionStatus.STOPPED,
                 SessionStatus.COMPLETED,
                 SessionStatus.FAILED,
@@ -444,3 +443,25 @@ def test_parallel_sqlite_initializers_upgrade_one_legacy_database(tmp_path):
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(checkpoints)")]
     assert len(columns) == len(set(columns)) == 17
+
+
+def test_sqlite_nested_store_calls_do_not_commit_outer_transaction(tmp_path):
+    import pytest
+
+    path = str(tmp_path / "transaction.db")
+    store = SqliteStore(path)
+    store.save_checkpoint(Checkpoint("session", "agent", SessionStatus.RUNNING))
+    with pytest.raises(RuntimeError, match="rollback"):
+        with store.session_transaction():
+            original = store.load_checkpoint("session")
+            original.tokens_used = 10
+            store.save_checkpoint(original)
+            with store.session_transaction():
+                assert store.load_checkpoint("session").tokens_used == 10
+                assert store.update_supervisor_checkpoint(
+                    Checkpoint("session", "agent", SessionStatus.RUNNING, tokens_used=11),
+                    expected_resume_count=0,
+                )
+            assert store.load_checkpoint("session").tokens_used == 11
+            raise RuntimeError("rollback")
+    assert SqliteStore(path).load_checkpoint("session").tokens_used == 0

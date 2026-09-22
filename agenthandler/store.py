@@ -27,7 +27,17 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import (
+    Any,
+    ContextManager,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    runtime_checkable,
+)
 
 # Maximum payload size in bytes (1 MB). Payloads exceeding this are rejected.
 MAX_PAYLOAD_BYTES = 1_048_576
@@ -172,13 +182,17 @@ class AtomicCheckpointStore(StateStore, Protocol):
     """Optional fencing capability required for durable supervisor checkpoints.
 
     Update only counters, circuit-breaker state, and timestamp if the stored
-    session is RUNNING in the expected resume generation. Never create a missing
+    session is RUNNING or PAUSED in the expected resume generation. Never create a missing
     session or replace lifecycle/acceptance metadata. Return False when fenced.
     """
 
     def update_supervisor_checkpoint(
         self, checkpoint: Checkpoint, *, expected_resume_count: int
     ) -> bool: ...
+
+    def session_transaction(self) -> ContextManager[None]:
+        """Serialize a read/change/write sequence, including nested store calls."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +205,12 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self._data: Dict[str, Checkpoint] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def session_transaction(self) -> Iterator[None]:
+        with self._lock:
+            yield
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         with self._lock:
@@ -204,7 +223,7 @@ class MemoryStore:
             existing = self._data.get(checkpoint.session_id)
             if (
                 existing is None
-                or existing.status != SessionStatus.RUNNING
+                or existing.status not in (SessionStatus.RUNNING, SessionStatus.PAUSED)
                 or existing.resume_count != expected_resume_count
             ):
                 return False
@@ -275,7 +294,8 @@ class SqliteStore:
 
     def __init__(self, db_path: str = "agenthandler_sessions.db"):
         self._db_path = db_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._transactions = threading.local()
 
         # Create file with restricted permissions if it doesn't exist
         if not os.path.exists(db_path):
@@ -294,7 +314,25 @@ class SqliteStore:
                     conn.execute(migration)
 
     @contextmanager
+    def session_transaction(self) -> Iterator[None]:
+        with self._lock:
+            if getattr(self._transactions, "connection", None) is not None:
+                yield
+                return
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._transactions.connection = conn
+                try:
+                    yield
+                finally:
+                    del self._transactions.connection
+
+    @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        active = getattr(self._transactions, "connection", None)
+        if active is not None:
+            yield active
+            return
         conn = sqlite3.connect(self._db_path)
         try:
             with conn:
@@ -344,7 +382,7 @@ class SqliteStore:
                        SET iterations = MAX(iterations, ?),
                            tokens_used = MAX(tokens_used, ?),
                            circuit_breaker_states = ?, timestamp = ?
-                       WHERE session_id = ? AND status = ? AND resume_count = ?""",
+                       WHERE session_id = ? AND status IN (?, ?) AND resume_count = ?""",
                     (
                         checkpoint.iterations,
                         checkpoint.tokens_used,
@@ -352,6 +390,7 @@ class SqliteStore:
                         checkpoint.timestamp,
                         checkpoint.session_id,
                         SessionStatus.RUNNING.value,
+                        SessionStatus.PAUSED.value,
                         expected_resume_count,
                     ),
                 )

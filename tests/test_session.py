@@ -593,6 +593,9 @@ async def test_sqlite_tampering_rejected_after_tool_checkpoint_and_restart(tmp_p
     with pytest.raises(AgentHandlerError) as exc:
         SessionManager(store).resume(sid)
     assert exc.value.kind == "policy_tampered"
+    failed = SqliteStore(str(tmp_path / "state.db")).load_checkpoint(sid)
+    assert failed.status == SessionStatus.FAILED
+    assert failed.failure_reason
 
 
 @pytest.mark.asyncio
@@ -665,10 +668,18 @@ async def test_external_manager_control_fences_inflight_supervisor_checkpoint(tm
         return "external effect completed"
 
     assert (await old.call("inflight", inflight)).succeeded
-    assert owner.status(sid) == expected
+    actual = owner.status(sid)
+    if operation == "pause":
+        assert actual.status == SessionStatus.PAUSED
+        assert actual.tokens_used == 12  # Account for the in-flight call's late usage.
+        assert actual.resume_count == expected.resume_count
+        assert actual.audit_log == expected.audit_log
+        assert old.supports_atomic_checkpoints
+    else:
+        assert actual == expected
+        assert not old.supports_atomic_checkpoints
     assert old.resume_count == 0
     assert old.paused
-    assert not old.supports_atomic_checkpoints
     assert (await old.call("again", good_tool)).error.kind == "agent_paused"
 
 
@@ -787,3 +798,104 @@ def test_lifecycle_merge_never_decreases_checkpoint_counters(operation):
     after = manager.status(sid)
     assert after.tokens_used == 7
     assert after.iterations == 2
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+async def test_concurrent_managers_receive_unique_resume_generations(tmp_path, kind):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agenthandler import SqliteStore
+
+    path = str(tmp_path / "sessions.db")
+    shared = MemoryStore()
+
+    def store():
+        return shared if kind == "memory" else SqliteStore(path)
+
+    owner = SessionManager(store())
+    sid = owner.start("agent", POLICY)
+    managers = [SessionManager(store()), SessionManager(store())]
+    barrier = Barrier(2)
+
+    def resume(manager):
+        barrier.wait(timeout=2)
+        return manager.resume(sid)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        supervisors = list(pool.map(resume, managers))
+    assert sorted(sv.resume_count for sv in supervisors) == [1, 2]
+    assert owner.status(sid).resume_count == 2
+    stale = next(sv for sv in supervisors if sv.resume_count == 1)
+
+    async def forbidden():
+        pytest.fail("Stale generation executed a tool")
+
+    result = await stale.call("forbidden", forbidden)
+    assert not result.succeeded
+    assert result.error.kind == "agent_paused"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("external_pause", [False, True])
+async def test_late_usage_after_pause_survives_fresh_manager_resume(tmp_path, kind, external_pause):
+    from agenthandler import SqliteStore
+
+    path = str(tmp_path / "sessions.db")
+    shared = MemoryStore()
+
+    def store():
+        return shared if kind == "memory" else SqliteStore(path)
+
+    owner = SessionManager(store())
+    control = SessionManager(store()) if external_pause else owner
+    sid = owner.start("agent", POLICY)
+    supervisor = owner.get_supervisor(sid)
+    supervisor.record_tokens(2)
+
+    async def inflight():
+        control.pause(sid)
+        supervisor.record_tokens(7)
+        return "completed"
+
+    assert (await supervisor.call("work", inflight)).succeeded
+    paused = owner.status(sid)
+    assert paused.status == SessionStatus.PAUSED
+    assert paused.tokens_used == 9
+    assert supervisor.paused
+    assert supervisor.supports_atomic_checkpoints
+    fresh = SessionManager(store())
+    resumed = fresh.resume(sid)
+    assert resumed.budget().tokens_used == 9
+    supervisor.record_tokens(1)
+    assert fresh.status(sid).tokens_used == 9
+    assert not supervisor.supports_atomic_checkpoints
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("usage", ["tokens", "iterations"])
+def test_paused_overbudget_usage_persists_before_error_and_fresh_resume(tmp_path, kind, usage):
+    from agenthandler import SqliteStore
+
+    path = str(tmp_path / "sessions.db")
+    shared = MemoryStore()
+
+    def store():
+        return shared if kind == "memory" else SqliteStore(path)
+
+    owner = SessionManager(store())
+    sid = owner.start("agent", {"token_budget": 3, "max_iterations": 1})
+    supervisor = owner.get_supervisor(sid)
+    SessionManager(store()).pause(sid)
+    if usage == "tokens":
+        with pytest.raises(AgentHandlerError, match="budget"):
+            supervisor.record_tokens(4)
+    else:
+        supervisor.record_iteration()
+        with pytest.raises(AgentHandlerError):
+            supervisor.record_iteration()
+    paused = owner.status(sid)
+    assert paused.status == SessionStatus.PAUSED
+    resumed = SessionManager(store()).resume(sid)
+    assert resumed.budget().tokens_used == (4 if usage == "tokens" else 0)
+    assert resumed.budget().iterations == (2 if usage == "iterations" else 0)

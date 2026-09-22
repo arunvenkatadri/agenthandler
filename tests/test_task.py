@@ -643,3 +643,102 @@ async def test_durable_runner_rejects_non_atomic_custom_store(tmp_path):
     with pytest.raises(ValueError, match="atomic"):
         runner.create("agent", "Write report", steps)
     assert runner.manager.list_sessions() == []
+
+
+@pytest.mark.parametrize("control", ["stop", "pause", "resume"])
+async def test_control_winning_finalization_race_blocks_completion(tmp_path, monkeypatch, control):
+    from contextlib import contextmanager
+
+    runner = runner_at(tmp_path)
+    controller = SessionManager(SqliteStore(str(tmp_path / "sessions.db")))
+    steps = [milestone()]
+    task = runner.create("agent", "Write report", steps)
+    guard = runner.manager.running_guard
+    entered = 0
+
+    @contextmanager
+    def race(sid, sv):
+        nonlocal entered
+        entered += 1
+        if entered == 2:  # The final completion guard, after milestone acceptance.
+            getattr(controller, control)(sid)
+        with guard(sid, sv):
+            yield
+
+    monkeypatch.setattr(runner.manager, "running_guard", race)
+    result = await runner.run(task.task_id, steps)
+    assert result.status == "blocked"
+    assert not runner.store.load(task.task_id).completed
+    assert (
+        controller.status(task.session_id).status.value
+        == {"stop": "stopped", "pause": "paused", "resume": "running"}[control]
+    )
+
+
+async def test_completion_commit_serializes_with_external_stop(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    runner = runner_at(tmp_path)
+    controller = SessionManager(SqliteStore(str(tmp_path / "sessions.db")))
+    steps = [milestone()]
+    task = runner.create("agent", "Write report", steps)
+    save = runner.store._save
+    started, stopped = Event(), Event()
+    submitted = []
+
+    def stop():
+        started.set()
+        controller.stop(task.session_id)
+        stopped.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+
+        def save_with_stop(record, **kwargs):
+            if record.completed:
+                submitted.append(pool.submit(stop))
+                assert started.wait(timeout=2)
+                assert not stopped.wait(timeout=0.05)
+            save(record, **kwargs)
+
+        monkeypatch.setattr(runner.store, "_save", save_with_stop)
+        result = await runner.run(task.task_id, steps)
+        submitted[0].result(timeout=2)
+    assert result.completed
+    assert runner.store.load(task.task_id).completed
+    assert controller.status(task.session_id).status.value == "stopped"
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_task_and_session_database_must_be_distinct(tmp_path, alias):
+    session_path = tmp_path / "sessions.db"
+    manager = SessionManager(SqliteStore(str(session_path)))
+    task_path = tmp_path / "alias.db" if alias else session_path
+    if alias:
+        task_path.symlink_to(session_path)
+    with pytest.raises(ValueError, match="separate database files"):
+        DurableTaskRunner(manager, SqliteTaskStore(str(task_path)))
+
+
+async def test_completion_cleanup_cannot_stop_a_newer_generation(tmp_path, monkeypatch):
+    runner = runner_at(tmp_path)
+    controller = SessionManager(SqliteStore(str(tmp_path / "sessions.db")))
+    steps = [milestone()]
+    task = runner.create("agent", "Write report", steps)
+    close = runner._close_session
+
+    def resume_before_cleanup(record):
+        controller.resume(record.session_id)
+        close(record)
+
+    monkeypatch.setattr(runner, "_close_session", resume_before_cleanup)
+    result = await runner.run(task.task_id, steps)
+    assert result.completed
+    assert result.completion_generation == 0
+    checkpoint = controller.status(task.session_id)
+    assert checkpoint.resume_count == 1
+    assert checkpoint.status.value == "running"
+    replay = await runner_at(tmp_path).run(task.task_id, steps)
+    assert replay.completed
+    assert replay.completion_generation == 0
+    assert controller.status(task.session_id).status.value == "running"

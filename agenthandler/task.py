@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Seq
 
 from .completion import CompletionStatus, VerificationResult
 from .session import SessionManager
-from .store import SessionStatus
+from .store import SessionStatus, SqliteStore
 from .supervisor import Supervisor
 
 
@@ -128,6 +128,7 @@ class TaskRecord:
     calls_reserved: int = 0
     tokens_reserved: int = 0
     cost_reserved_microusd: int = 0
+    completion_generation: Optional[int] = None
 
     @property
     def completed(self) -> bool:
@@ -219,6 +220,10 @@ class DurableTaskRunner:
     """
 
     def __init__(self, manager: SessionManager, store: SqliteTaskStore):
+        if isinstance(manager._store, SqliteStore) and os.path.samefile(
+            manager._store._db_path, store.path
+        ):
+            raise ValueError("Session and task stores require separate database files")
         self.manager = manager
         self.store = store
 
@@ -328,17 +333,24 @@ class DurableTaskRunner:
                     )
                     if not isinstance(verification, VerificationResult):
                         raise ValueError("Verifier must return VerificationResult")
+                    with self.manager.running_guard(record.session_id, sv):
+                        self._require_running(record, sv)
+                        verification.validate()
+                        state["verification"] = _json_copy(asdict(verification))
+                        if not verification.passed:
+                            raise _Blocked(verification.reason or "Acceptance verification failed")
+                        state["state"] = "verified"
+                        record.status = CompletionStatus.RUNNING
+                        self.store._save(record)
+                # Serialize final acceptance with session controls. The task
+                # commit occurs while the session's running generation is held;
+                # a concurrent stop either wins first or follows completion.
+                with self.manager.running_guard(record.session_id, sv):
                     self._require_running(record, sv)
-                    verification.validate()
-                    state["verification"] = _json_copy(asdict(verification))
-                    if not verification.passed:
-                        raise _Blocked(verification.reason or "Acceptance verification failed")
-                    state["state"] = "verified"
-                    record.status = CompletionStatus.RUNNING
+                    record.completion_generation = sv.resume_count
+                    record.status = CompletionStatus.VERIFIED
+                    record.reason = "All milestone acceptance checks passed"
                     self.store._save(record)
-                self._require_running(record, sv)
-                record.status = CompletionStatus.VERIFIED
-                record.reason = "All milestone acceptance checks passed"
             except _Blocked as exc:
                 record.status = CompletionStatus.BLOCKED
                 record.reason = str(exc)
@@ -348,7 +360,8 @@ class DurableTaskRunner:
             except Exception as exc:
                 record.status = CompletionStatus.BLOCKED
                 record.reason = str(exc)
-            self.store._save(record)
+            if not record.completed:
+                self.store._save(record)
             if record.completed:
                 self._close_session(record)
             return record
@@ -369,9 +382,8 @@ class DurableTaskRunner:
     def _close_session(self, record: TaskRecord) -> None:
         # Persist task completion first. A crash before session cleanup can then
         # be repaired on resume without replaying any actions or verification.
-        checkpoint = self.manager.status(record.session_id)
-        if checkpoint is not None and checkpoint.status != SessionStatus.STOPPED:
-            self.manager.stop(record.session_id)
+        if record.completion_generation is not None:
+            self.manager.stop_if_generation(record.session_id, record.completion_generation)
 
     async def _call(
         self,
