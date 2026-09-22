@@ -294,10 +294,11 @@ class SessionManager:
             if old is not None:
                 old.paused = True
                 old._store = None
-                data = old.to_checkpoint_data()
-                cp.iterations = data["iterations"]
-                cp.tokens_used = data["tokens_used"]
-                cp.circuit_breaker_states = data["circuit_breaker_states"]
+                if old.resume_count == cp.resume_count:
+                    data = old.to_checkpoint_data()
+                    cp.iterations = max(cp.iterations, data["iterations"])
+                    cp.tokens_used = max(cp.tokens_used, data["tokens_used"])
+                    cp.circuit_breaker_states = data["circuit_breaker_states"]
             self._persist_audit(session_id, cp)
             cp.resume_count += 1
             cp.status = SessionStatus.RUNNING
@@ -343,10 +344,10 @@ class SessionManager:
                 sv.finish()
 
             cp.status = SessionStatus.STOPPED
-            if sv is not None:
+            if sv is not None and sv.resume_count == cp.resume_count:
                 data = sv.to_checkpoint_data()
-                cp.iterations = data["iterations"]
-                cp.tokens_used = data["tokens_used"]
+                cp.iterations = max(cp.iterations, data["iterations"])
+                cp.tokens_used = max(cp.tokens_used, data["tokens_used"])
 
             self._persist_audit(session_id, cp)
 
@@ -444,7 +445,9 @@ class SessionManager:
         """Flush in-memory audit entries into the checkpoint for persistence."""
         with self._lock:
             sink = self._audit_sinks.get(session_id)
-        if sink is not None:
+        with self._lock:
+            sv = self._supervisors.get(session_id)
+        if sink is not None and sv is not None and sv.resume_count == cp.resume_count:
             with self._lock:
                 baseline = self._audit_baselines.get(session_id, [])
             cp.audit_log = deepcopy(baseline) + [e.to_dict() for e in sink.entries]

@@ -743,3 +743,47 @@ def test_direct_supervisor_rejects_legacy_store_without_unsafe_persistence():
         Supervisor(Policy(), store=store, session_id="legacy")
     assert store.saves == 0
     assert store.list_sessions() == []
+
+
+@pytest.mark.parametrize("operation", ["pause", "stop", "resume"])
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_stale_manager_preserves_new_generation_state(tmp_path, operation, kind):
+    from agenthandler import SqliteStore
+
+    store = MemoryStore() if kind == "memory" else SqliteStore(str(tmp_path / "sessions.db"))
+    original = SessionManager(store)
+    newer = SessionManager(store)
+    sid = original.start("agent", POLICY)
+    old = original.get_supervisor(sid)
+    active = newer.resume(sid)
+    active.record_tokens(7)
+    active.record_iteration()
+    newer.pause(sid)  # Flush the newer generation's audit.
+    before = newer.status(sid)
+    getattr(original, operation)(sid)
+    after = original.status(sid)
+    assert after.tokens_used == 7
+    assert after.iterations == 1
+    assert after.circuit_breaker_states == before.circuit_breaker_states
+    assert after.audit_log == before.audit_log
+    assert after.resume_count == (2 if operation == "resume" else 1)
+    if operation == "resume":
+        assert original.get_supervisor(sid).budget().tokens_used == 7
+    if operation != "pause":
+        assert old.paused
+        assert not old.supports_atomic_checkpoints
+
+
+@pytest.mark.parametrize("operation", ["stop", "resume"])
+def test_lifecycle_merge_never_decreases_checkpoint_counters(operation):
+    store = MemoryStore()
+    manager = SessionManager(store)
+    sid = manager.start("agent", POLICY)
+    checkpoint = manager.status(sid)
+    checkpoint.tokens_used = 7
+    checkpoint.iterations = 2
+    store.save_checkpoint(checkpoint)
+    getattr(manager, operation)(sid)
+    after = manager.status(sid)
+    assert after.tokens_used == 7
+    assert after.iterations == 2
