@@ -39,8 +39,9 @@ Usage:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional
+import math
+from dataclasses import dataclass, field, fields, replace
+from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set
 
 from .completion import CompletionStatus, VerificationResult
 from .errors import AgentHandlerError
@@ -105,6 +106,37 @@ class ReflectionResult:
     @property
     def total_tool_calls(self) -> int:
         return sum(1 for c in self.cycles if c.tool_called)
+
+
+def _snapshot_value(value: Any, active: Optional[Set[int]] = None, depth: int = 0) -> Any:
+    """Detach JSON data without invoking arbitrary output copy/serialization hooks.
+
+    Non-JSON objects, cycles, and excessive nesting become explicit placeholders.
+    Original tool objects stay in the run result; validators receive observations
+    and independently check acceptance rather than manipulating live handles.
+    """
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        return value if math.isfinite(value) else "<non-finite number omitted>"
+    if type(value) not in (dict, list, tuple):
+        return "<non-JSON value omitted>"
+    if depth >= 64:
+        return "<deeply nested value omitted>"
+    if active is None:
+        active = set()
+    identity = id(value)
+    if identity in active:
+        return "<cyclic value omitted>"
+    active.add(identity)
+    try:
+        if type(value) is dict:
+            if any(type(key) is not str for key in value):
+                return "<object with non-string keys omitted>"
+            return {key: _snapshot_value(item, active, depth + 1) for key, item in value.items()}
+        return [_snapshot_value(item, active, depth + 1) for item in value]
+    finally:
+        active.remove(identity)
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +375,7 @@ class ReflectionLoop:
                 _OBSERVE_PROMPT.replace("{goal}", self._goal)
                 .replace("{tool}", tool_name)
                 .replace("{args}", json.dumps(tool_args, default=str)[:500])
-                .replace("{result}", json.dumps(tool_result.output, default=str)[:2000])
+                .replace("{result}", json.dumps(_snapshot_value(tool_result.output))[:2000])
             )
             try:
                 cycle.observation = (await self._llm(observe_prompt)).strip()
@@ -356,7 +388,7 @@ class ReflectionLoop:
                 .replace("{thought}", cycle.thought)
                 .replace("{tool}", tool_name)
                 .replace("{args}", json.dumps(tool_args, default=str)[:500])
-                .replace("{result}", json.dumps(tool_result.output, default=str)[:1000])
+                .replace("{result}", json.dumps(_snapshot_value(tool_result.output))[:1000])
                 .replace("{observation}", cycle.observation)
             )
             try:
@@ -389,14 +421,25 @@ class ReflectionLoop:
         return result
 
     async def _verify_completion(self, result: ReflectionResult) -> None:
-        from copy import deepcopy
-
         result.status = CompletionStatus.PROPOSED
         result.stopped_reason = "completion_proposed"
         if self._verifier is None:
             return
         try:
-            verification = await self._verifier(deepcopy(result))
+            proposal = replace(
+                result,
+                cycles=[
+                    ReflectionCycle(
+                        **{
+                            item.name: _snapshot_value(getattr(cycle, item.name))
+                            for item in fields(ReflectionCycle)
+                        }
+                    )
+                    for cycle in result.cycles
+                ],
+                verification=None,
+            )
+            verification = await self._verifier(proposal)
             if not isinstance(verification, VerificationResult):
                 raise ValueError("Verifier must return VerificationResult")
             verification.validate()

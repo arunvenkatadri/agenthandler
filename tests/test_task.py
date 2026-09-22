@@ -511,3 +511,27 @@ async def test_iteration_denial_keeps_ready_and_preserves_reservations(tmp_path)
         assert result.calls_reserved == attempts
         assert result.milestones["report"]["state"] == "ready"
         assert "reconciliation" not in result.reason
+
+
+async def test_partial_policy_retains_durable_iteration_default(tmp_path):
+    runner = runner_at(tmp_path)
+    steps = [replace(milestone(), id=f"step-{n}") for n in range(3)]
+    policy = {"tool_timeout": 10}
+    task = runner.create("agent", "Three milestones", steps, policy_dict=policy)
+    assert runner.manager.get_supervisor(task.session_id).policy.max_iterations == 100
+    assert policy == {"tool_timeout": 10}
+    result = await runner.run(task.task_id, steps)
+    assert result.completed
+    assert result.calls_reserved == 6
+
+
+async def test_explicit_policy_iteration_limit_is_preserved(tmp_path):
+    runner = runner_at(tmp_path)
+    steps = [replace(milestone(), id=f"step-{n}") for n in range(3)]
+    task = runner.create(
+        "agent", "Three milestones", steps, policy_dict={"tool_timeout": 10, "max_iterations": 5}
+    )
+    result = await runner.run(task.task_id, steps)
+    assert not result.completed
+    assert result.milestones["step-2"]["state"] == "executed"
+    assert result.calls_reserved == 6

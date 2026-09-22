@@ -238,7 +238,8 @@ class DurableTaskRunner:
         safe_inputs = _json_copy(inputs or {})
         limits = limits or TaskLimits()
         with self.store.claim():
-            sid = self.manager.start(agent_id, policy_dict or {"max_iterations": limits.max_calls})
+            policy = {"max_iterations": limits.max_calls, **(policy_dict or {})}
+            sid = self.manager.start(agent_id, policy)
             record = TaskRecord(
                 task_id=uuid.uuid4().hex,
                 session_id=sid,

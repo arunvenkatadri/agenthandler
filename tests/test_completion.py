@@ -124,3 +124,72 @@ async def test_reflection_stop_is_not_completion(stop, expected):
     ).run()
     assert not result.completed
     assert result.status == expected
+
+
+@pytest.mark.parametrize("kind", ["handle", "cyclic", "json"])
+async def test_noncopyable_tool_output_cannot_prevent_independent_verification(tmp_path, kind):
+    class Handle:
+        def __deepcopy__(self, memo):
+            raise TypeError("Live handles cannot be copied")
+
+        def __str__(self):
+            raise TypeError("Live handles must not be formatted")
+
+    outputs = {"handle": Handle(), "json": {"items": [{"count": 1}]}}
+    cycle = {"items": []}
+    cycle["items"].append(cycle)
+    outputs["cyclic"] = cycle
+    output = outputs[kind]
+    artifact = tmp_path / "report.txt"
+    calls = []
+    thinks = 0
+
+    async def write_report(**kwargs):
+        artifact.write_text("Required result")
+        return output
+
+    async def llm(prompt):
+        nonlocal thinks
+        if "What should you do next" in prompt:
+            thinks += 1
+            if thinks == 1:
+                return '{"done": false, "tool": "write", "args": {"metadata": {"id": 1}}}'
+            return '{"done": true, "final_answer": "Report written"}'
+        if "Reflect on this cycle" in prompt:
+            return '{"should_stop": false, "reflection": "Check the artifact"}'
+        return "Observed report creation"
+
+    async def verify(proposal):
+        calls.append(proposal)
+        assert proposal.status == CompletionStatus.PROPOSED
+        assert proposal.cycles[0].tool_succeeded
+        if kind == "handle":
+            assert proposal.cycles[0].tool_output == "<non-JSON value omitted>"
+        elif kind == "cyclic":
+            assert proposal.cycles[0].tool_output == {"items": ["<cyclic value omitted>"]}
+        else:
+            assert proposal.cycles[0].tool_output == {"items": [{"count": 1}]}
+            proposal.cycles[0].tool_output["items"][0]["count"] = 99
+        proposal.cycles[0].tool_args["metadata"]["id"] = 99
+        proposal.cycles[0].thought = "mutated"
+        proposal.final_answer = "mutated"
+        return VerificationResult(
+            artifact.read_text() == "Required result", {"checked": str(artifact)}
+        )
+
+    result = await ReflectionLoop(
+        SessionManager(MemoryStore()),
+        "test",
+        "Write report",
+        llm,
+        {"write": write_report},
+        verifier=verify,
+    ).run()
+    assert len(calls) == 1
+    assert result.completed
+    assert result.final_answer == "Report written"
+    assert result.cycles[0].tool_output is output
+    assert result.cycles[0].tool_args == {"metadata": {"id": 1}}
+    assert result.cycles[0].thought != "mutated"
+    if kind == "json":
+        assert output == {"items": [{"count": 1}]}
