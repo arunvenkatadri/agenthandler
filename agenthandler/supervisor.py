@@ -197,6 +197,7 @@ class Supervisor:
         """
         self._check_paused()
         self._start_time = time.monotonic()
+        self._last_activity = self._start_time
         self._audit.record(
             AuditPhase.REQUEST_START,
             AuditOutcome.INFO,

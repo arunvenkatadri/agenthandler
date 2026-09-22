@@ -423,7 +423,12 @@ async def test_same_worker_retry_refreshes_deadline_without_resetting_budget(tmp
         "agent",
         "Write report",
         [step],
-        policy_dict={"max_iterations": 10, "request_timeout": 1, "token_budget": 20},
+        policy_dict={
+            "max_iterations": 10,
+            "request_timeout": 1,
+            "silence_timeout": 1,
+            "token_budget": 20,
+        },
     )
     sv = runner.manager.get_supervisor(task.session_id)
     sv.record_tokens(7)
@@ -432,6 +437,7 @@ async def test_same_worker_retry_refreshes_deadline_without_resetting_budget(tmp
     assert first.calls_reserved == 2
     # Time passing between attempts must not make the next authorized run dead.
     sv._start_time -= 2
+    sv._last_activity -= 2
     second = await runner.run(task.task_id, [step])
     assert second.completed
     assert second.calls_reserved == 3
