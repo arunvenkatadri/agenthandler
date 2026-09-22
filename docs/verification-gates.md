@@ -54,7 +54,8 @@ errors, missing dependencies, skipped tests, and unrelated failures.
 
 Required stages are fixed when the gate is constructed. Agent output cannot
 remove a requirement. Each validator receives its own detached JSON context.
-Reports copy the returned evidence before the next validator executes. Extra
+Reports copy and freeze the stage mapping and nested evidence before the next
+validator executes; callers cannot change a recorded verdict or its evidence. Extra
 registered validators do not replace required ones. `report.to_dict()` returns a
 JSON snapshot; `report.as_result()` adapts the report to a verifier expecting
 `VerificationResult`.

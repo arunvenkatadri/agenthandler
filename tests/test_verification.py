@@ -4,7 +4,13 @@ import asyncio
 
 import pytest
 
-from agenthandler import VerificationGate, VerificationResult
+from agenthandler import (
+    VerificationGate,
+    VerificationReport,
+    VerificationResult,
+    VerificationStageResult,
+    VerificationStatus,
+)
 
 
 async def passed(context):
@@ -177,3 +183,40 @@ async def test_contract_cannot_be_mutated_after_registration():
     report = await gate.run({}, validators={})
     assert report.required_stages == ("test",)
     assert not report.verified
+
+
+def test_report_verdict_cannot_be_changed_through_retained_or_exposed_mapping():
+    failed = VerificationStageResult(VerificationStatus.FAILED, {"exit_code": 1})
+    passed = VerificationStageResult(VerificationStatus.VERIFIED, {"exit_code": 0})
+    stages = {"regression": failed}
+    required = ["regression"]
+    report = VerificationReport(required, stages)
+    stages["regression"] = passed
+    required.clear()
+    assert report.status == "failed"
+    assert not report.verified
+    with pytest.raises(TypeError):
+        report.stages["regression"] = passed
+    assert not report.as_result().passed
+
+
+def test_stage_evidence_is_deeply_immutable_but_exports_plain_json():
+    evidence = {"runs": [{"exit_code": 1}], "artifact": {"digest": "original"}}
+    stage = VerificationStageResult(VerificationStatus.FAILED, evidence)
+    evidence["runs"][0]["exit_code"] = 0
+    evidence["artifact"]["digest"] = "changed"
+    with pytest.raises(TypeError):
+        stage.evidence["artifact"]["digest"] = "changed"
+    with pytest.raises(TypeError):
+        stage.evidence["runs"][0]["exit_code"] = 0
+    with pytest.raises(TypeError):
+        stage.evidence["runs"][0] = {"exit_code": 0}
+    report = VerificationReport(("regression",), {"regression": stage})
+    exported = report.to_dict()
+    assert exported["stages"]["regression"]["evidence"] == {
+        "runs": [{"exit_code": 1}],
+        "artifact": {"digest": "original"},
+    }
+    exported["stages"]["regression"]["evidence"]["runs"][0]["exit_code"] = 0
+    assert report.to_dict()["stages"]["regression"]["evidence"]["runs"][0]["exit_code"] == 1
+    report.as_result().validate()

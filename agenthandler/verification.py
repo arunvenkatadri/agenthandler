@@ -13,6 +13,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence, Tuple
 
 from .completion import VerificationResult
@@ -28,11 +29,34 @@ def _copy(value: Any) -> Any:
     return json.loads(json.dumps(value, allow_nan=False))
 
 
+def _freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_thaw(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class VerificationStageResult:
     status: VerificationStatus
-    evidence: Dict[str, Any] = field(default_factory=dict)
+    evidence: Mapping[str, Any] = field(default_factory=dict)
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        # Freeze a detached JSON snapshot, including nested containers. Callers
+        # may keep or mutate the validator's original evidence after this point.
+        if not isinstance(self.evidence, Mapping):
+            raise ValueError("Verification stage evidence must be a JSON object")
+        object.__setattr__(self, "evidence", _freeze(_copy(_thaw(self.evidence))))
 
 
 @dataclass(frozen=True)
@@ -41,6 +65,10 @@ class VerificationReport:
 
     required_stages: Tuple[str, ...]
     stages: Mapping[str, VerificationStageResult]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "required_stages", tuple(self.required_stages))
+        object.__setattr__(self, "stages", MappingProxyType(dict(self.stages)))
 
     @property
     def status(self) -> VerificationStatus:
@@ -64,7 +92,7 @@ class VerificationReport:
             "stages": {
                 name: {
                     "status": result.status.value,
-                    "evidence": _copy(result.evidence),
+                    "evidence": _thaw(result.evidence),
                     "reason": result.reason,
                 }
                 for name, result in self.stages.items()
