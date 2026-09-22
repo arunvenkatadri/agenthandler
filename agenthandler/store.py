@@ -22,10 +22,12 @@ import secrets
 import sqlite3
 import stat
 import threading
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 # Maximum payload size in bytes (1 MB). Payloads exceeding this are rejected.
 MAX_PAYLOAD_BYTES = 1_048_576
@@ -179,15 +181,15 @@ class MemoryStore:
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         with self._lock:
-            self._data[checkpoint.session_id] = checkpoint
+            self._data[checkpoint.session_id] = deepcopy(checkpoint)
 
     def load_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
         with self._lock:
-            return self._data.get(session_id)
+            return deepcopy(self._data.get(session_id))
 
     def list_sessions(self) -> List[Checkpoint]:
         with self._lock:
-            return list(self._data.values())
+            return deepcopy(list(self._data.values()))
 
     def delete_session(self, session_id: str) -> bool:
         with self._lock:
@@ -222,6 +224,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 _MIGRATIONS = [
     "ALTER TABLE checkpoints ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE checkpoints ADD COLUMN audit_log TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE checkpoints ADD COLUMN stateless INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE checkpoints ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE checkpoints ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE checkpoints ADD COLUMN policy_checksum TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -248,14 +254,19 @@ class SqliteStore:
         with self._connect() as conn:
             conn.execute(_CREATE_TABLE)
             # Run migrations for existing databases
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(checkpoints)")}
             for migration in _MIGRATIONS:
-                try:
+                if migration.split()[5] not in columns:
                     conn.execute(migration)
-                except sqlite3.OperationalError:
-                    pass  # column already exists
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         with self._lock:
@@ -265,8 +276,9 @@ class SqliteStore:
                     INSERT OR REPLACE INTO checkpoints
                         (session_id, agent_id, status, iterations, tokens_used,
                          token_limit, iteration_limit, circuit_breaker_states,
-                         policy_dict, payload, timestamp, created_at, audit_log)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         policy_dict, payload, timestamp, created_at, audit_log,
+                         stateless, resume_count, failure_reason, policy_checksum)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         checkpoint.session_id,
                         checkpoint.agent_id,
@@ -281,6 +293,10 @@ class SqliteStore:
                         checkpoint.timestamp,
                         checkpoint.created_at,
                         json.dumps(checkpoint.audit_log),
+                        int(checkpoint.stateless),
+                        checkpoint.resume_count,
+                        checkpoint.failure_reason,
+                        checkpoint.policy_checksum,
                     ),
                 )
 
@@ -338,4 +354,8 @@ class SqliteStore:
             timestamp=row[10],
             created_at=created_at,
             audit_log=audit_log,
+            stateless=bool(row[13]),
+            resume_count=row[14],
+            failure_reason=row[15],
+            policy_checksum=row[16],
         )
