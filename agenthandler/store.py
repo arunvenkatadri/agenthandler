@@ -22,10 +22,22 @@ import secrets
 import sqlite3
 import stat
 import threading
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import (
+    Any,
+    ContextManager,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    runtime_checkable,
+)
 
 # Maximum payload size in bytes (1 MB). Payloads exceeding this are rejected.
 MAX_PAYLOAD_BYTES = 1_048_576
@@ -165,6 +177,24 @@ class StateStore(Protocol):
     def delete_session(self, session_id: str) -> bool: ...
 
 
+@runtime_checkable
+class AtomicCheckpointStore(StateStore, Protocol):
+    """Optional fencing capability required for durable supervisor checkpoints.
+
+    Update only counters, circuit-breaker state, and timestamp if the stored
+    session is RUNNING or PAUSED in the expected resume generation. Never create a missing
+    session or replace lifecycle/acceptance metadata. Return False when fenced.
+    """
+
+    def update_supervisor_checkpoint(
+        self, checkpoint: Checkpoint, *, expected_resume_count: int
+    ) -> bool: ...
+
+    def session_transaction(self) -> ContextManager[None]:
+        """Serialize a read/change/write sequence, including nested store calls."""
+        ...
+
+
 # ---------------------------------------------------------------------------
 # MemoryStore — dict-backed, for testing
 # ---------------------------------------------------------------------------
@@ -175,19 +205,41 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self._data: Dict[str, Checkpoint] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def session_transaction(self) -> Iterator[None]:
+        with self._lock:
+            yield
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         with self._lock:
-            self._data[checkpoint.session_id] = checkpoint
+            self._data[checkpoint.session_id] = deepcopy(checkpoint)
+
+    def update_supervisor_checkpoint(
+        self, checkpoint: Checkpoint, *, expected_resume_count: int
+    ) -> bool:
+        with self._lock:
+            existing = self._data.get(checkpoint.session_id)
+            if (
+                existing is None
+                or existing.status not in (SessionStatus.RUNNING, SessionStatus.PAUSED)
+                or existing.resume_count != expected_resume_count
+            ):
+                return False
+            existing.iterations = max(existing.iterations, checkpoint.iterations)
+            existing.tokens_used = max(existing.tokens_used, checkpoint.tokens_used)
+            existing.circuit_breaker_states = deepcopy(checkpoint.circuit_breaker_states)
+            existing.timestamp = checkpoint.timestamp
+            return True
 
     def load_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
         with self._lock:
-            return self._data.get(session_id)
+            return deepcopy(self._data.get(session_id))
 
     def list_sessions(self) -> List[Checkpoint]:
         with self._lock:
-            return list(self._data.values())
+            return deepcopy(list(self._data.values()))
 
     def delete_session(self, session_id: str) -> bool:
         with self._lock:
@@ -195,6 +247,20 @@ class MemoryStore:
                 del self._data[session_id]
                 return True
             return False
+
+    def delete_expired(self, max_age_seconds: float) -> int:
+        """Remove checkpoints by creation age, matching SqliteStore expiry."""
+        cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        with self._lock:
+            expired = [
+                sid
+                for sid, cp in self._data.items()
+                if cp.created_at and cp.created_at < cutoff_iso
+            ]
+            for sid in expired:
+                del self._data[sid]
+            return len(expired)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +288,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 _MIGRATIONS = [
     "ALTER TABLE checkpoints ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE checkpoints ADD COLUMN audit_log TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE checkpoints ADD COLUMN stateless INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE checkpoints ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE checkpoints ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE checkpoints ADD COLUMN policy_checksum TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -238,7 +308,8 @@ class SqliteStore:
 
     def __init__(self, db_path: str = "agenthandler_sessions.db"):
         self._db_path = db_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._transactions = threading.local()
 
         # Create file with restricted permissions if it doesn't exist
         if not os.path.exists(db_path):
@@ -246,16 +317,42 @@ class SqliteStore:
             os.close(fd)
 
         with self._connect() as conn:
+            # Serialize schema inspection and migration across processes and
+            # independent store instances, not merely this instance's lock.
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(_CREATE_TABLE)
             # Run migrations for existing databases
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(checkpoints)")}
             for migration in _MIGRATIONS:
-                try:
+                if migration.split()[5] not in columns:
                     conn.execute(migration)
-                except sqlite3.OperationalError:
-                    pass  # column already exists
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path)
+    @contextmanager
+    def session_transaction(self) -> Iterator[None]:
+        with self._lock:
+            if getattr(self._transactions, "connection", None) is not None:
+                yield
+                return
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._transactions.connection = conn
+                try:
+                    yield
+                finally:
+                    del self._transactions.connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        active = getattr(self._transactions, "connection", None)
+        if active is not None:
+            yield active
+            return
+        conn = sqlite3.connect(self._db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         with self._lock:
@@ -265,8 +362,9 @@ class SqliteStore:
                     INSERT OR REPLACE INTO checkpoints
                         (session_id, agent_id, status, iterations, tokens_used,
                          token_limit, iteration_limit, circuit_breaker_states,
-                         policy_dict, payload, timestamp, created_at, audit_log)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         policy_dict, payload, timestamp, created_at, audit_log,
+                         stateless, resume_count, failure_reason, policy_checksum)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         checkpoint.session_id,
                         checkpoint.agent_id,
@@ -281,8 +379,36 @@ class SqliteStore:
                         checkpoint.timestamp,
                         checkpoint.created_at,
                         json.dumps(checkpoint.audit_log),
+                        int(checkpoint.stateless),
+                        checkpoint.resume_count,
+                        checkpoint.failure_reason,
+                        checkpoint.policy_checksum,
                     ),
                 )
+
+    def update_supervisor_checkpoint(
+        self, checkpoint: Checkpoint, *, expected_resume_count: int
+    ) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """UPDATE checkpoints
+                       SET iterations = MAX(iterations, ?),
+                           tokens_used = MAX(tokens_used, ?),
+                           circuit_breaker_states = ?, timestamp = ?
+                       WHERE session_id = ? AND status IN (?, ?) AND resume_count = ?""",
+                    (
+                        checkpoint.iterations,
+                        checkpoint.tokens_used,
+                        json.dumps(checkpoint.circuit_breaker_states),
+                        checkpoint.timestamp,
+                        checkpoint.session_id,
+                        SessionStatus.RUNNING.value,
+                        SessionStatus.PAUSED.value,
+                        expected_resume_count,
+                    ),
+                )
+                return cursor.rowcount == 1
 
     def load_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
         with self._lock:
@@ -338,4 +464,8 @@ class SqliteStore:
             timestamp=row[10],
             created_at=created_at,
             audit_log=audit_log,
+            stateless=bool(row[13]),
+            resume_count=row[14],
+            failure_reason=row[15],
+            policy_checksum=row[16],
         )

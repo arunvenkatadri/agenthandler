@@ -79,6 +79,14 @@ class Supervisor:
         pre_guardrails: Optional[List[Any]] = None,
         post_guardrails: Optional[List[Any]] = None,
     ):
+        from .store import AtomicCheckpointStore
+
+        if store is not None and not isinstance(store, AtomicCheckpointStore):
+            raise ValueError(
+                "Supervisor persistence requires atomic checkpoint support "
+                "(AtomicCheckpointStore); implement update_supervisor_checkpoint "
+                "or omit store for in-memory execution"
+            )
         self._policy = policy
         self._budget = BudgetTracker.from_policy(policy)
         self._circuit_breakers: Dict[str, CircuitBreaker] = {}
@@ -99,6 +107,7 @@ class Supervisor:
         # Optional durable state
         self._store = store
         self._session_id = session_id
+        self._resume_count = 0
         self._agent_id = agent_id
         self._approval_queue = approval_queue
         self._observer = observer
@@ -131,6 +140,18 @@ class Supervisor:
         return self._session_id
 
     @property
+    def resume_count(self) -> int:
+        """Resume generation owned by this supervisor; unchanged for its lifetime."""
+        return self._resume_count
+
+    @property
+    def supports_atomic_checkpoints(self) -> bool:
+        """Whether the configured store can fence stale checkpoint writers."""
+        from .store import AtomicCheckpointStore
+
+        return isinstance(self._store, AtomicCheckpointStore)
+
+    @property
     def agent_id(self) -> Optional[str]:
         return self._agent_id
 
@@ -148,9 +169,12 @@ class Supervisor:
 
     def record_tokens(self, tokens: int) -> int:
         """Record token usage. Returns new total. Raises AgentHandlerError if over budget."""
-        total = self._budget.record_tokens(tokens)
-        self._auto_checkpoint()
-        return total
+        try:
+            return self._budget.record_tokens(tokens)
+        finally:
+            # BudgetTracker charges before raising an over-limit error. Preserve
+            # that usage too, including late responses after operator pause.
+            self._auto_checkpoint()
 
     def record_iteration(self) -> int:
         """Record an iteration of the agent loop. Returns iteration count.
@@ -164,7 +188,6 @@ class Supervisor:
                 AuditOutcome.ALLOWED,
                 detail=f"Iteration {count} / {self._policy.max_iterations}",
             )
-            self._auto_checkpoint()
             return count
         except AgentHandlerError as e:
             self._audit.record(
@@ -173,6 +196,8 @@ class Supervisor:
                 detail=str(e),
             )
             raise
+        finally:
+            self._auto_checkpoint()
 
     def circuit_breaker_states(self) -> Dict[str, str]:
         """Get current circuit breaker states for all tracked tools."""
@@ -186,6 +211,23 @@ class Supervisor:
                 reset_after=self._policy.circuit_breaker_reset,
             )
         return self._circuit_breakers[tool_name]
+
+    def begin_request(self) -> None:
+        """Start an application-authorized attempt with a fresh request deadline.
+
+        Lifetime token/iteration budgets, policy, circuit breakers, and operator
+        pause state are preserved. Call once at an outer request boundary, never
+        once per tool call. DurableTaskRunner also checks persisted session state
+        before opening an attempt; this method does not authorize session resume.
+        """
+        self._check_paused()
+        self._start_time = time.monotonic()
+        self._last_activity = self._start_time
+        self._audit.record(
+            AuditPhase.REQUEST_START,
+            AuditOutcome.INFO,
+            detail="New request attempt; existing lifetime budgets preserved",
+        )
 
     def _check_request_timeout(self) -> None:
         """Check if the overall request has timed out."""
@@ -202,7 +244,31 @@ class Supervisor:
             raise AgentHandlerError.dead_man_switch(int(silence * 1000))
 
     def _check_paused(self) -> None:
-        """Check if this supervisor is paused."""
+        """Fence stale generations and persisted operator controls before work."""
+        if self._store is not None and self._session_id is not None:
+            from .store import SessionStatus
+
+            try:
+                checkpoint = self._store.load_checkpoint(self._session_id)
+            except Exception as exc:
+                raise AgentHandlerError(
+                    "checkpoint_unavailable", "Cannot verify persisted session authorization"
+                ) from exc
+            same_generation = (
+                checkpoint is not None and checkpoint.resume_count == self._resume_count
+            )
+            if (
+                checkpoint is None
+                or not same_generation
+                or checkpoint.status != SessionStatus.RUNNING
+            ):
+                self._paused = True
+                if (
+                    checkpoint is None
+                    or not same_generation
+                    or checkpoint.status != SessionStatus.PAUSED
+                ):
+                    self._store = None
         if self._paused and self._session_id:
             raise AgentHandlerError.agent_paused(self._session_id)
 
@@ -746,6 +812,7 @@ class Supervisor:
             pre_guardrails=pre_guardrails,
             post_guardrails=post_guardrails,
         )
+        sv._resume_count = checkpoint.resume_count
         # Restore budget counters
         if checkpoint.tokens_used > 0:
             sv._budget._tokens_used = checkpoint.tokens_used
@@ -850,39 +917,37 @@ class Supervisor:
         self._last_call_meta = {"input_tokens": 0, "output_tokens": 0, "model": ""}
 
     def _auto_checkpoint(self) -> None:
-        """Save a checkpoint if a store is configured.
+        """Atomically persist statistics for this running or paused resume generation.
 
-        Only updates SYSTEM-CONTROLLED fields (budget counters, circuit breaker
-        states, status, timestamp). Does NOT touch payload (agent-writable) or
-        policy_dict (immutable). This preserves the trust boundary between
-        supervisor-controlled and agent-controlled data.
+        Lifecycle state and other application metadata belong to SessionManager.
+        Custom stores without AtomicCheckpointStore cannot safely auto-checkpoint;
+        no read/replace fallback is attempted. Durable callers must require the
+        capability explicitly using supports_atomic_checkpoints.
         """
-        if self._store is None or self._session_id is None:
+        from .store import AtomicCheckpointStore, Checkpoint, SessionStatus
+
+        store = self._store
+        if self._session_id is None or not isinstance(store, AtomicCheckpointStore):
             return
-        from .store import Checkpoint, SessionStatus
-
-        # Load existing checkpoint to preserve payload, policy, created_at, audit_log
-        existing = self._store.load_checkpoint(self._session_id)
-
-        status = SessionStatus.PAUSED if self._paused else SessionStatus.RUNNING
         data = self.to_checkpoint_data()
         cp = Checkpoint(
             session_id=self._session_id,
             agent_id=self._agent_id or "",
-            status=status,
+            status=SessionStatus.RUNNING,
             iterations=data["iterations"],
             tokens_used=data["tokens_used"],
-            token_limit=data["token_limit"],
-            iteration_limit=data["iteration_limit"],
             circuit_breaker_states=data["circuit_breaker_states"],
-            # Preserve immutable fields from the original checkpoint
-            policy_dict=existing.policy_dict if existing else self._policy.to_dict(),
-            payload=existing.payload if existing else {},
             timestamp=datetime.now(timezone.utc).isoformat(),
-            created_at=existing.created_at if existing else "",
-            audit_log=existing.audit_log if existing else [],
         )
         try:
-            self._store.save_checkpoint(cp)
+            if not store.update_supervisor_checkpoint(cp, expected_resume_count=self._resume_count):
+                # Another manager stopped, deleted, or resumed this
+                # session. Retire the stale in-memory writer immediately.
+                self._paused = True
+                self._store = None
+            else:
+                # Preserve PAUSED writers for late usage accounting while
+                # ensuring they cannot begin another tool call.
+                self._check_paused()
         except Exception:
             pass  # checkpoint must never crash the request

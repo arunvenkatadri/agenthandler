@@ -432,7 +432,7 @@ class TestStatelessSessions:
         mgr2 = SessionManager(store)
         with pytest.raises(AgentHandlerError) as exc_info:
             mgr2.resume(sid)
-        assert exc_info.value.kind == "session_not_recoverable"
+        assert exc_info.value.kind == "session_not_found"
 
     def test_stateless_stop_works(self):
         store = MemoryStore()
@@ -452,7 +452,7 @@ class TestStatelessSessions:
         sv.record_tokens(500)
         await sv.call("search", good_tool, query="test")
         # The checkpoint should still have 0 tokens (no auto-checkpoint)
-        cp = store.load_checkpoint(sid)
+        cp = mgr.status(sid)
         assert cp.tokens_used == 0
         assert cp.iterations == 0
 
@@ -559,3 +559,376 @@ class TestCrashLoopProtection:
         with pytest.raises(AgentHandlerError) as exc_info:
             mgr.resume(sid)
         assert exc_info.value.kind == "max_resumes_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_security_metadata_survives_tools_and_process_restarts(tmp_path):
+    from agenthandler.store import SqliteStore
+
+    path = str(tmp_path / "state.db")
+    mgr = SessionManager(SqliteStore(path))
+    sid = mgr.start("agent", {"max_resumes": 1})
+    checksum = mgr.status(sid).policy_checksum
+    sv = mgr.resume(sid)
+    await sv.call("search", good_tool, query="test")
+    cp = SqliteStore(path).load_checkpoint(sid)
+    assert cp.resume_count == 1
+    assert cp.policy_checksum == checksum
+    with pytest.raises(AgentHandlerError, match="resum"):
+        SessionManager(SqliteStore(path)).resume(sid)
+    assert SqliteStore(path).load_checkpoint(sid).failure_reason
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tampering_rejected_after_tool_checkpoint_and_restart(tmp_path):
+    from agenthandler.store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "state.db"))
+    mgr = SessionManager(store)
+    sid = mgr.start("agent", {"max_iterations": 2})
+    await mgr.get_supervisor(sid).call("search", good_tool)
+    cp = store.load_checkpoint(sid)
+    cp.policy_dict["max_iterations"] = 999
+    store.save_checkpoint(cp)
+    with pytest.raises(AgentHandlerError) as exc:
+        SessionManager(store).resume(sid)
+    assert exc.value.kind == "policy_tampered"
+    failed = SqliteStore(str(tmp_path / "state.db")).load_checkpoint(sid)
+    assert failed.status == SessionStatus.FAILED
+    assert failed.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_stopped_and_replaced_supervisors_cannot_execute():
+    mgr = SessionManager(MemoryStore())
+    sid = mgr.start("agent")
+    old = mgr.get_supervisor(sid)
+    replacement = mgr.resume(sid)
+    assert (await old.call("search", good_tool)).error.kind == "agent_paused"
+    mgr.stop(sid)
+    assert (await replacement.call("search", good_tool)).error.kind == "agent_paused"
+    assert mgr.status(sid).status == SessionStatus.STOPPED
+
+
+def test_pause_resume_does_not_duplicate_or_drop_audit_entries():
+    mgr = SessionManager(MemoryStore())
+    sid = mgr.start("agent")
+    initial = mgr.get_audit_entries(sid)
+    mgr.pause(sid)
+    mgr.pause(sid)
+    assert mgr.get_audit_entries(sid) == initial
+    mgr.resume(sid)
+    after_resume = mgr.get_audit_entries(sid)
+    assert after_resume[: len(initial)] == initial
+    mgr.pause(sid)
+    assert mgr.get_audit_entries(sid) == after_resume
+    mgr.stop(sid)
+    assert mgr.get_audit_entries(sid)[: len(after_resume)] == after_resume
+
+
+@pytest.mark.asyncio
+async def test_stateless_session_never_writes_to_disk_even_after_resume(tmp_path):
+    from agenthandler.store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "state.db"))
+    mgr = SessionManager(store)
+    sid = mgr.start("agent", stateless=True, payload={"private": "data"})
+    mgr.pause(sid)
+    sv = mgr.resume(sid)
+    await sv.call("search", good_tool)
+    mgr.update_payload(sid, {"private": "updated"})
+    mgr.stop(sid)
+    assert store.list_sessions() == []
+    assert mgr.status(sid).status == SessionStatus.STOPPED
+
+
+@pytest.mark.parametrize("operation", ["pause", "stop", "resume"])
+async def test_external_manager_control_fences_inflight_supervisor_checkpoint(tmp_path, operation):
+    from agenthandler.store import SqliteStore
+
+    path = str(tmp_path / "state.db")
+    owner = SessionManager(SqliteStore(path))
+    control = SessionManager(SqliteStore(path))
+    sid = owner.start("agent", POLICY)
+    old = owner.get_supervisor(sid)
+    old.record_tokens(2)
+    expected = None
+
+    async def inflight():
+        nonlocal expected
+        if operation == "resume":
+            replacement = control.resume(sid)
+            assert replacement.resume_count == 1
+            replacement.record_tokens(5)
+        else:
+            getattr(control, operation)(sid)
+        expected = control.status(sid)
+        # An old SDK continuation must not overwrite the replacement's counters.
+        old.record_tokens(10)
+        return "external effect completed"
+
+    assert (await old.call("inflight", inflight)).succeeded
+    actual = owner.status(sid)
+    if operation == "pause":
+        assert actual.status == SessionStatus.PAUSED
+        assert actual.tokens_used == 12  # Account for the in-flight call's late usage.
+        assert actual.resume_count == expected.resume_count
+        assert actual.audit_log == expected.audit_log
+        assert old.supports_atomic_checkpoints
+    else:
+        assert actual == expected
+        assert not old.supports_atomic_checkpoints
+    assert old.resume_count == 0
+    assert old.paused
+    assert (await old.call("again", good_tool)).error.kind == "agent_paused"
+
+
+class LegacyStore:
+    def __init__(self, inner=None):
+        self.inner = inner or MemoryStore()
+        self.saves = 0
+
+    def save_checkpoint(self, checkpoint):
+        self.saves += 1
+        self.inner.save_checkpoint(checkpoint)
+
+    def load_checkpoint(self, session_id):
+        return self.inner.load_checkpoint(session_id)
+
+    def list_sessions(self):
+        return self.inner.list_sessions()
+
+    def delete_session(self, session_id):
+        return self.inner.delete_session(session_id)
+
+
+def test_legacy_store_rejects_persistent_start_before_creating_anything(monkeypatch):
+    def unexpected_id():
+        pytest.fail("Unsupported persistence must be rejected before allocating a session")
+
+    monkeypatch.setattr("agenthandler.session.new_session_id", unexpected_id)
+    store = LegacyStore()
+    manager = SessionManager(store)
+    with pytest.raises(ValueError, match="AtomicCheckpointStore"):
+        manager.start("agent", POLICY)
+    assert store.saves == 0
+    assert store.list_sessions() == []
+    assert manager._supervisors == {}
+
+
+def test_legacy_store_rejects_persistent_resume_without_mutating_checkpoint():
+    inner = MemoryStore()
+    owner = SessionManager(inner)
+    sid = owner.start("agent", POLICY)
+    original = owner.status(sid)
+    store = LegacyStore(inner)
+    fresh = SessionManager(store)
+    with pytest.raises(ValueError, match="AtomicCheckpointStore"):
+        fresh.resume(sid)
+    assert store.saves == 0
+    assert fresh.status(sid) == original
+    assert fresh.get_supervisor(sid) is None
+
+
+async def test_legacy_store_still_supports_explicit_stateless_sessions():
+    store = LegacyStore()
+    manager = SessionManager(store)
+    sid = manager.start("agent", POLICY, stateless=True)
+    supervisor = manager.get_supervisor(sid)
+    supervisor.record_tokens(1)
+    manager.pause(sid)
+    resumed = manager.resume(sid)
+    assert resumed.budget().tokens_used == 1
+    assert (await resumed.call("search", good_tool)).succeeded
+    manager.stop(sid)
+    assert manager.status(sid).status == SessionStatus.STOPPED
+    assert store.saves == 0
+    assert store.list_sessions() == []
+
+
+def test_direct_supervisor_rejects_legacy_store_without_unsafe_persistence():
+    from agenthandler import Policy, Supervisor
+
+    store = LegacyStore()
+    with pytest.raises(ValueError, match="atomic"):
+        Supervisor(Policy(), store=store, session_id="legacy")
+    assert store.saves == 0
+    assert store.list_sessions() == []
+
+
+@pytest.mark.parametrize("operation", ["pause", "stop", "resume"])
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_stale_manager_preserves_new_generation_state(tmp_path, operation, kind):
+    from agenthandler import SqliteStore
+
+    store = MemoryStore() if kind == "memory" else SqliteStore(str(tmp_path / "sessions.db"))
+    original = SessionManager(store)
+    newer = SessionManager(store)
+    sid = original.start("agent", POLICY)
+    old = original.get_supervisor(sid)
+    active = newer.resume(sid)
+    active.record_tokens(7)
+    active.record_iteration()
+    newer.pause(sid)  # Flush the newer generation's audit.
+    before = newer.status(sid)
+    getattr(original, operation)(sid)
+    after = original.status(sid)
+    assert after.tokens_used == 7
+    assert after.iterations == 1
+    assert after.circuit_breaker_states == before.circuit_breaker_states
+    assert after.audit_log == before.audit_log
+    assert after.resume_count == (2 if operation == "resume" else 1)
+    if operation == "resume":
+        assert original.get_supervisor(sid).budget().tokens_used == 7
+    if operation != "pause":
+        assert old.paused
+        assert not old.supports_atomic_checkpoints
+
+
+@pytest.mark.parametrize("operation", ["stop", "resume"])
+def test_lifecycle_merge_never_decreases_checkpoint_counters(operation):
+    store = MemoryStore()
+    manager = SessionManager(store)
+    sid = manager.start("agent", POLICY)
+    checkpoint = manager.status(sid)
+    checkpoint.tokens_used = 7
+    checkpoint.iterations = 2
+    store.save_checkpoint(checkpoint)
+    getattr(manager, operation)(sid)
+    after = manager.status(sid)
+    assert after.tokens_used == 7
+    assert after.iterations == 2
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+async def test_concurrent_managers_receive_unique_resume_generations(tmp_path, kind):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agenthandler import SqliteStore
+
+    path = str(tmp_path / "sessions.db")
+    shared = MemoryStore()
+
+    def store():
+        return shared if kind == "memory" else SqliteStore(path)
+
+    owner = SessionManager(store())
+    sid = owner.start("agent", POLICY)
+    managers = [SessionManager(store()), SessionManager(store())]
+    barrier = Barrier(2)
+
+    def resume(manager):
+        barrier.wait(timeout=2)
+        return manager.resume(sid)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        supervisors = list(pool.map(resume, managers))
+    assert sorted(sv.resume_count for sv in supervisors) == [1, 2]
+    assert owner.status(sid).resume_count == 2
+    stale = next(sv for sv in supervisors if sv.resume_count == 1)
+
+    async def forbidden():
+        pytest.fail("Stale generation executed a tool")
+
+    result = await stale.call("forbidden", forbidden)
+    assert not result.succeeded
+    assert result.error.kind == "agent_paused"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("external_pause", [False, True])
+async def test_late_usage_after_pause_survives_fresh_manager_resume(tmp_path, kind, external_pause):
+    from agenthandler import SqliteStore
+
+    path = str(tmp_path / "sessions.db")
+    shared = MemoryStore()
+
+    def store():
+        return shared if kind == "memory" else SqliteStore(path)
+
+    owner = SessionManager(store())
+    control = SessionManager(store()) if external_pause else owner
+    sid = owner.start("agent", POLICY)
+    supervisor = owner.get_supervisor(sid)
+    supervisor.record_tokens(2)
+
+    async def inflight():
+        control.pause(sid)
+        supervisor.record_tokens(7)
+        return "completed"
+
+    assert (await supervisor.call("work", inflight)).succeeded
+    paused = owner.status(sid)
+    assert paused.status == SessionStatus.PAUSED
+    assert paused.tokens_used == 9
+    assert supervisor.paused
+    assert supervisor.supports_atomic_checkpoints
+    fresh = SessionManager(store())
+    resumed = fresh.resume(sid)
+    assert resumed.budget().tokens_used == 9
+    supervisor.record_tokens(1)
+    assert fresh.status(sid).tokens_used == 9
+    assert not supervisor.supports_atomic_checkpoints
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("usage", ["tokens", "iterations"])
+def test_paused_overbudget_usage_persists_before_error_and_fresh_resume(tmp_path, kind, usage):
+    from agenthandler import SqliteStore
+
+    path = str(tmp_path / "sessions.db")
+    shared = MemoryStore()
+
+    def store():
+        return shared if kind == "memory" else SqliteStore(path)
+
+    owner = SessionManager(store())
+    sid = owner.start("agent", {"token_budget": 3, "max_iterations": 1})
+    supervisor = owner.get_supervisor(sid)
+    SessionManager(store()).pause(sid)
+    if usage == "tokens":
+        with pytest.raises(AgentHandlerError, match="budget"):
+            supervisor.record_tokens(4)
+    else:
+        supervisor.record_iteration()
+        with pytest.raises(AgentHandlerError):
+            supervisor.record_iteration()
+    paused = owner.status(sid)
+    assert paused.status == SessionStatus.PAUSED
+    resumed = SessionManager(store()).resume(sid)
+    assert resumed.budget().tokens_used == (4 if usage == "tokens" else 0)
+    assert resumed.budget().iterations == (2 if usage == "iterations" else 0)
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_expiration_releases_stateless_checkpoints_and_bookkeeping(tmp_path, terminal):
+    from agenthandler import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "sessions.db"))
+    manager = SessionManager(store)
+    expired = manager.start("request", POLICY, {"private": "large payload"}, stateless=True)
+    supervisor = manager.get_supervisor(expired)
+    if terminal:
+        manager.stop(expired)
+    checkpoint = manager.status(expired)
+    checkpoint.created_at = "2000-01-01T00:00:00+00:00"
+    manager._ephemeral_store.save_checkpoint(checkpoint)
+    recent = manager.start("recent", POLICY, stateless=True)
+    persistent = manager.start("persistent", POLICY)
+    old = manager.status(persistent)
+    old.created_at = checkpoint.created_at
+    store.save_checkpoint(old)
+    assert manager.delete_expired(86400) == 2
+    assert manager.status(expired) is None
+    assert manager.status(persistent) is None
+    assert manager.status(recent) is not None
+    assert supervisor.paused
+    assert expired not in manager._stateless_sessions
+    assert expired not in manager._session_locks
+    assert manager.get_supervisor(expired) is None
+    assert expired not in manager._audit_sinks
+    assert expired not in manager._audit_baselines
+    assert expired not in manager._original_policies
+    assert [cp.session_id for cp in manager.list_sessions()] == [recent]
+    assert manager.delete_expired(86400) == 0

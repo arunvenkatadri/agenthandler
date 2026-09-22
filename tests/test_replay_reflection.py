@@ -153,10 +153,11 @@ class TestReflectionLoop:
             policy_dict=POLICY,
         )
         result = await loop.run(max_cycles=5)
-        assert result.completed is True
+        assert result.completed is False
+        assert result.status == "proposed"
         assert result.final_answer == "42"
         assert result.cycles_used == 1
-        assert result.stopped_reason == "goal_achieved"
+        assert result.stopped_reason == "completion_proposed"
 
     @pytest.mark.asyncio
     async def test_single_cycle_with_tool(self):
@@ -209,7 +210,8 @@ class TestReflectionLoop:
             policy_dict=POLICY,
         )
         result = await loop.run(max_cycles=5)
-        assert result.completed is True
+        assert result.completed is False
+        assert result.status == "proposed"
         assert result.cycles_used == 2
         # Cycle 1 called the tool
         assert result.cycles[0].tool_called == "search"

@@ -24,6 +24,7 @@ from .audit import AuditEntry, AuditLog, AuditOutcome, AuditPhase, AuditSink, Js
 from .budget import BudgetSnapshot, BudgetTracker
 from .builder import SkillBuilder
 from .circuit_breaker import CircuitBreaker, CircuitState
+from .completion import CompletionStatus, VerificationResult
 from .connectors import MongoConnector, SqlConnector
 from .context import AnchoredState, CompressedContext, CompressedHistory, ContextWindow, Turn
 from .errors import AgentHandlerError
@@ -64,6 +65,7 @@ from .sdk_adapters import (
 from .session import SessionManager
 from .skill import Skill, SkillStore, ToolDefinition, ToolParameter
 from .store import (
+    AtomicCheckpointStore,
     Checkpoint,
     MemoryStore,
     SessionStatus,
@@ -78,7 +80,24 @@ from .streams import (
     StreamConnector,
 )
 from .supervisor import SupervisedResult, Supervisor
+from .task import (
+    CallBudget,
+    DurableTaskRunner,
+    Milestone,
+    RecoveryResult,
+    SqliteTaskStore,
+    TaskBusyError,
+    TaskContext,
+    TaskLimits,
+    TaskRecord,
+)
 from .triggers import DbWatchEntry, Scheduler, WebhookTrigger
+from .verification import (
+    VerificationGate,
+    VerificationReport,
+    VerificationStageResult,
+    VerificationStatus,
+)
 
 try:
     from .mcp_server import SupervisedMCPServer
@@ -103,6 +122,21 @@ except ImportError:
     pass
 
 __all__ = [
+    "CompletionStatus",
+    "VerificationResult",
+    "CallBudget",
+    "DurableTaskRunner",
+    "Milestone",
+    "RecoveryResult",
+    "SqliteTaskStore",
+    "TaskBusyError",
+    "TaskContext",
+    "TaskLimits",
+    "TaskRecord",
+    "VerificationGate",
+    "VerificationReport",
+    "VerificationStageResult",
+    "VerificationStatus",
     "Policy",
     "OnFailure",
     "Action",
@@ -135,6 +169,7 @@ __all__ = [
     "to_openclaw_tool_schema",
     "to_openclaw_manifest",
     "StateStore",
+    "AtomicCheckpointStore",
     "MemoryStore",
     "SqliteStore",
     "Checkpoint",
