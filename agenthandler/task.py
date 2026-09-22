@@ -273,6 +273,7 @@ class DurableTaskRunner:
                 sv = self.manager.get_supervisor(record.session_id)
                 if sv is None:
                     sv = self.manager.resume(record.session_id)
+                self._require_running(record, sv)
                 sv.begin_request()
                 record.status = CompletionStatus.RUNNING
                 record.reason = ""
@@ -327,6 +328,7 @@ class DurableTaskRunner:
                     )
                     if not isinstance(verification, VerificationResult):
                         raise ValueError("Verifier must return VerificationResult")
+                    self._require_running(record, sv)
                     verification.validate()
                     state["verification"] = _json_copy(asdict(verification))
                     if not verification.passed:
@@ -334,6 +336,7 @@ class DurableTaskRunner:
                     state["state"] = "verified"
                     record.status = CompletionStatus.RUNNING
                     self.store._save(record)
+                self._require_running(record, sv)
                 record.status = CompletionStatus.VERIFIED
                 record.reason = "All milestone acceptance checks passed"
             except _Blocked as exc:
@@ -349,6 +352,19 @@ class DurableTaskRunner:
             if record.completed:
                 self._close_session(record)
             return record
+
+    def _require_running(self, record: TaskRecord, sv: Supervisor) -> None:
+        if not sv.supports_atomic_checkpoints:
+            raise _Blocked("Session requires an active supervisor with atomic checkpoint support")
+        checkpoint = self.manager.status(record.session_id)
+        if (
+            checkpoint is None
+            or checkpoint.status != SessionStatus.RUNNING
+            or checkpoint.resume_count != sv.resume_count
+            or sv.paused
+            or self.manager.get_supervisor(record.session_id) is not sv
+        ):
+            raise _Blocked("Session stopped, paused, or replaced; explicit authorization required")
 
     def _close_session(self, record: TaskRecord) -> None:
         # Persist task completion first. A crash before session cleanup can then
@@ -366,6 +382,7 @@ class DurableTaskRunner:
         callback: Callable[[TaskContext], Awaitable[Any]],
         budget: CallBudget,
     ) -> Any:
+        self._require_running(record, sv)
         reservations = (
             (record.calls_reserved + 1, record.limits["max_calls"]),
             (record.tokens_reserved + budget.tokens, record.limits["max_tokens"]),
@@ -408,6 +425,7 @@ class DurableTaskRunner:
             # the callback outside this durable reservation and worker lock.
             if not active or invoked:
                 raise RuntimeError("Durable callback cannot be replayed by Supervisor")
+            self._require_running(record, sv)
             invoked = True
             output = await callback(context)
             returned = True

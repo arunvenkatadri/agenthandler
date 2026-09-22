@@ -312,3 +312,104 @@ def test_memory_store_isolates_nested_snapshots():
     loaded.policy_dict["nested"].append(3)
     store.list_sessions()[0].policy_dict["nested"].append(4)
     assert store.load_checkpoint("s").policy_dict == {"nested": [1]}
+
+
+class TestAtomicSupervisorCheckpoints:
+    def _store(self, kind, tmp_path):
+        return MemoryStore() if kind == "memory" else SqliteStore(str(tmp_path / "state.db"))
+
+    def test_only_statistics_change_and_counters_do_not_regress(self, tmp_path):
+        for kind in ("memory", "sqlite"):
+            store = self._store(kind, tmp_path)
+            original = Checkpoint(
+                "session",
+                "agent",
+                SessionStatus.RUNNING,
+                iterations=3,
+                tokens_used=10,
+                resume_count=2,
+                policy_checksum="checksum",
+                policy_dict={"max_iterations": 5},
+                payload={"artifact": "original"},
+                audit_log=[{"event": "resume"}],
+                created_at="created",
+                token_limit=100,
+                iteration_limit=5,
+            )
+            store.save_checkpoint(original)
+            update = Checkpoint(
+                "session",
+                "wrong-agent",
+                SessionStatus.STOPPED,
+                iterations=2,
+                tokens_used=11,
+                policy_dict={"max_iterations": 999},
+                payload={"artifact": "changed"},
+                circuit_breaker_states={"tool": {"state": "closed"}},
+                timestamp="updated",
+            )
+            assert store.update_supervisor_checkpoint(update, expected_resume_count=2)
+            expected = original.to_dict()
+            expected.update(
+                tokens_used=11,
+                timestamp="updated",
+                circuit_breaker_states={
+                    "tool": {"state": "closed"},
+                },
+            )
+            assert store.load_checkpoint("session").to_dict() == expected
+
+    def test_nonrunning_generation_and_missing_session_are_fenced(self, tmp_path):
+        for kind in ("memory", "sqlite"):
+            store = self._store(kind, tmp_path)
+            update = Checkpoint("session", "agent", SessionStatus.RUNNING, tokens_used=999)
+            assert not store.update_supervisor_checkpoint(update, expected_resume_count=0)
+            for status in (
+                SessionStatus.PAUSED,
+                SessionStatus.STOPPED,
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+            ):
+                original = Checkpoint("session", "agent", status, resume_count=1)
+                store.save_checkpoint(original)
+                assert not store.update_supervisor_checkpoint(update, expected_resume_count=1)
+                assert store.load_checkpoint("session") == original
+            original = Checkpoint("session", "agent", SessionStatus.RUNNING, resume_count=2)
+            store.save_checkpoint(original)
+            assert not store.update_supervisor_checkpoint(update, expected_resume_count=1)
+            assert store.load_checkpoint("session") == original
+
+
+def test_sqlite_atomic_update_is_fenced_by_concurrent_control_transaction(tmp_path):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    path = str(tmp_path / "state.db")
+    store = SqliteStore(path)
+    worker = SqliteStore(path)
+    store.save_checkpoint(Checkpoint("session", "agent", SessionStatus.RUNNING))
+    started = Event()
+
+    def stale_update():
+        started.set()
+        return worker.update_supervisor_checkpoint(
+            Checkpoint("session", "agent", SessionStatus.RUNNING, tokens_used=999),
+            expected_resume_count=0,
+        )
+
+    with sqlite3.connect(path) as control, ThreadPoolExecutor(max_workers=1) as pool:
+        control.execute("BEGIN IMMEDIATE")
+        control.execute(
+            "UPDATE checkpoints SET status = ?, resume_count = 1, tokens_used = 10 "
+            "WHERE session_id = 'session'",
+            (SessionStatus.RUNNING.value,),
+        )
+        pending = pool.submit(stale_update)
+        assert started.wait(timeout=2)
+        control.commit()
+        assert pending.result(timeout=2) is False
+    saved = store.load_checkpoint("session")
+    assert saved.status == SessionStatus.RUNNING
+    assert saved.resume_count == 1
+    assert saved.tokens_used == 10

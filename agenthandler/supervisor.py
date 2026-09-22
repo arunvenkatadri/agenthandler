@@ -99,6 +99,7 @@ class Supervisor:
         # Optional durable state
         self._store = store
         self._session_id = session_id
+        self._resume_count = 0
         self._agent_id = agent_id
         self._approval_queue = approval_queue
         self._observer = observer
@@ -129,6 +130,18 @@ class Supervisor:
     @property
     def session_id(self) -> Optional[str]:
         return self._session_id
+
+    @property
+    def resume_count(self) -> int:
+        """Resume generation owned by this supervisor; unchanged for its lifetime."""
+        return self._resume_count
+
+    @property
+    def supports_atomic_checkpoints(self) -> bool:
+        """Whether the configured store can fence stale checkpoint writers."""
+        from .store import AtomicCheckpointStore
+
+        return isinstance(self._store, AtomicCheckpointStore)
 
     @property
     def agent_id(self) -> Optional[str]:
@@ -763,6 +776,7 @@ class Supervisor:
             pre_guardrails=pre_guardrails,
             post_guardrails=post_guardrails,
         )
+        sv._resume_count = checkpoint.resume_count
         # Restore budget counters
         if checkpoint.tokens_used > 0:
             sv._budget._tokens_used = checkpoint.tokens_used
@@ -867,43 +881,33 @@ class Supervisor:
         self._last_call_meta = {"input_tokens": 0, "output_tokens": 0, "model": ""}
 
     def _auto_checkpoint(self) -> None:
-        """Save a checkpoint if a store is configured.
+        """Atomically persist statistics for this running resume generation.
 
-        Only updates SYSTEM-CONTROLLED fields (budget counters, circuit breaker
-        states, status, timestamp). Does NOT touch payload (agent-writable) or
-        policy_dict (immutable). This preserves the trust boundary between
-        supervisor-controlled and agent-controlled data.
+        Lifecycle state and other application metadata belong to SessionManager.
+        Custom stores without AtomicCheckpointStore cannot safely auto-checkpoint;
+        no read/replace fallback is attempted. Durable callers must require the
+        capability explicitly using supports_atomic_checkpoints.
         """
-        if self._store is None or self._session_id is None:
+        from .store import AtomicCheckpointStore, Checkpoint, SessionStatus
+
+        store = self._store
+        if self._session_id is None or self._paused or not isinstance(store, AtomicCheckpointStore):
             return
-        from .store import Checkpoint, SessionStatus
-
-        # Load existing checkpoint to preserve payload, policy, created_at, audit_log
-        existing = self._store.load_checkpoint(self._session_id)
-
-        status = SessionStatus.PAUSED if self._paused else SessionStatus.RUNNING
         data = self.to_checkpoint_data()
         cp = Checkpoint(
             session_id=self._session_id,
             agent_id=self._agent_id or "",
-            status=status,
+            status=SessionStatus.RUNNING,
             iterations=data["iterations"],
             tokens_used=data["tokens_used"],
-            token_limit=data["token_limit"],
-            iteration_limit=data["iteration_limit"],
             circuit_breaker_states=data["circuit_breaker_states"],
-            # Preserve immutable fields from the original checkpoint
-            policy_dict=existing.policy_dict if existing else self._policy.to_dict(),
-            payload=existing.payload if existing else {},
             timestamp=datetime.now(timezone.utc).isoformat(),
-            created_at=existing.created_at if existing else "",
-            audit_log=existing.audit_log if existing else [],
-            stateless=existing.stateless if existing else False,
-            resume_count=existing.resume_count if existing else 0,
-            failure_reason=existing.failure_reason if existing else "",
-            policy_checksum=existing.policy_checksum if existing else "",
         )
         try:
-            self._store.save_checkpoint(cp)
+            if not store.update_supervisor_checkpoint(cp, expected_resume_count=self._resume_count):
+                # Another manager stopped, paused, deleted, or resumed this
+                # session. Retire the stale in-memory writer immediately.
+                self._paused = True
+                self._store = None
         except Exception:
             pass  # checkpoint must never crash the request

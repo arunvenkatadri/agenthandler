@@ -167,6 +167,20 @@ class StateStore(Protocol):
     def delete_session(self, session_id: str) -> bool: ...
 
 
+@runtime_checkable
+class AtomicCheckpointStore(StateStore, Protocol):
+    """Optional fencing capability required for durable supervisor checkpoints.
+
+    Update only counters, circuit-breaker state, and timestamp if the stored
+    session is RUNNING in the expected resume generation. Never create a missing
+    session or replace lifecycle/acceptance metadata. Return False when fenced.
+    """
+
+    def update_supervisor_checkpoint(
+        self, checkpoint: Checkpoint, *, expected_resume_count: int
+    ) -> bool: ...
+
+
 # ---------------------------------------------------------------------------
 # MemoryStore — dict-backed, for testing
 # ---------------------------------------------------------------------------
@@ -182,6 +196,23 @@ class MemoryStore:
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         with self._lock:
             self._data[checkpoint.session_id] = deepcopy(checkpoint)
+
+    def update_supervisor_checkpoint(
+        self, checkpoint: Checkpoint, *, expected_resume_count: int
+    ) -> bool:
+        with self._lock:
+            existing = self._data.get(checkpoint.session_id)
+            if (
+                existing is None
+                or existing.status != SessionStatus.RUNNING
+                or existing.resume_count != expected_resume_count
+            ):
+                return False
+            existing.iterations = max(existing.iterations, checkpoint.iterations)
+            existing.tokens_used = max(existing.tokens_used, checkpoint.tokens_used)
+            existing.circuit_breaker_states = deepcopy(checkpoint.circuit_breaker_states)
+            existing.timestamp = checkpoint.timestamp
+            return True
 
     def load_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
         with self._lock:
@@ -299,6 +330,29 @@ class SqliteStore:
                         checkpoint.policy_checksum,
                     ),
                 )
+
+    def update_supervisor_checkpoint(
+        self, checkpoint: Checkpoint, *, expected_resume_count: int
+    ) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """UPDATE checkpoints
+                       SET iterations = MAX(iterations, ?),
+                           tokens_used = MAX(tokens_used, ?),
+                           circuit_breaker_states = ?, timestamp = ?
+                       WHERE session_id = ? AND status = ? AND resume_count = ?""",
+                    (
+                        checkpoint.iterations,
+                        checkpoint.tokens_used,
+                        json.dumps(checkpoint.circuit_breaker_states),
+                        checkpoint.timestamp,
+                        checkpoint.session_id,
+                        SessionStatus.RUNNING.value,
+                        expected_resume_count,
+                    ),
+                )
+                return cursor.rowcount == 1
 
     def load_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
         with self._lock:

@@ -535,3 +535,113 @@ async def test_explicit_policy_iteration_limit_is_preserved(tmp_path):
     assert not result.completed
     assert result.milestones["step-2"]["state"] == "executed"
     assert result.calls_reserved == 6
+
+
+@pytest.mark.parametrize("control", ["stop", "pause", "resume"])
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("phase", ["execute", "verify", "recover"])
+async def test_operator_control_fences_inflight_callbacks(tmp_path, control, external, phase):
+    runner = runner_at(tmp_path)
+    controller = (
+        SessionManager(SqliteStore(str(tmp_path / "sessions.db"))) if external else runner.manager
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def wait_for_control(name):
+        calls.append(name)
+        if phase == name:
+            entered.set()
+            await release.wait()
+
+    async def execute(ctx):
+        await wait_for_control("execute")
+        return {"artifact": "report"}
+
+    async def verify_output(ctx):
+        await wait_for_control("verify")
+        return VerificationResult(True, {"artifact": "report"})
+
+    async def recover(ctx):
+        await wait_for_control("recover")
+        return RecoveryResult("completed", {"artifact": "report"})
+
+    steps = [Milestone("report", "Report exists", execute, verify_output, recover)]
+    task = runner.create("agent", "Write report", steps)
+    if phase == "recover":
+        task.milestones["report"]["state"] = "pending"
+        runner.store._save(task)
+    running = asyncio.create_task(runner.run(task.task_id, steps))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    getattr(controller, control)(task.session_id)
+    release.set()
+    result = await running
+    assert not result.completed
+    assert result.status == "blocked"
+    assert calls == (["execute", "verify"] if phase == "verify" else [phase])
+    assert result.calls_reserved == (2 if phase == "verify" else 1)
+    assert result.milestones["report"]["state"] == "executed"
+    assert "verification" not in result.milestones["report"]
+    checkpoint = controller.status(task.session_id)
+    assert (
+        checkpoint.status.value
+        == {"stop": "stopped", "pause": "paused", "resume": "running"}[control]
+    )
+    assert checkpoint.resume_count == (1 if control == "resume" else 0)
+
+
+async def test_stop_in_pre_guardrail_prevents_callback(tmp_path):
+    from agenthandler import GuardrailResult
+
+    class Guard:
+        name = "operator_control"
+
+        def check(self, tool_name, kwargs, context):
+            runner.manager.stop(task.session_id)
+            return GuardrailResult(True, "Control processed", self.name)
+
+    runner = DurableTaskRunner(
+        SessionManager(SqliteStore(str(tmp_path / "sessions.db")), pre_guardrails=[Guard()]),
+        SqliteTaskStore(str(tmp_path / "tasks.db")),
+    )
+
+    async def never(ctx):
+        pytest.fail("Stopped session must not invoke the callback")
+
+    steps = [replace(milestone(), execute=never)]
+    task = runner.create("agent", "Write report", steps)
+    result = await runner.run(task.task_id, steps)
+    assert not result.completed
+    assert result.calls_reserved == 1
+    assert result.milestones["report"]["state"] == "ready"
+    assert runner.manager.status(task.session_id).status.value == "stopped"
+
+
+async def test_durable_runner_rejects_non_atomic_custom_store(tmp_path):
+    from agenthandler import MemoryStore
+
+    class LegacyStore:
+        def __init__(self):
+            self.inner = MemoryStore()
+
+        def save_checkpoint(self, cp):
+            return self.inner.save_checkpoint(cp)
+
+        def load_checkpoint(self, sid):
+            return self.inner.load_checkpoint(sid)
+
+        def list_sessions(self):
+            return self.inner.list_sessions()
+
+        def delete_session(self, sid):
+            return self.inner.delete_session(sid)
+
+    runner = DurableTaskRunner(
+        SessionManager(LegacyStore()), SqliteTaskStore(str(tmp_path / "tasks.db"))
+    )
+    steps = [milestone()]
+    task = runner.create("agent", "Write report", steps)
+    result = await runner.run(task.task_id, steps)
+    assert result.status == "blocked"
+    assert result.calls_reserved == 0
+    assert result.milestones["report"]["state"] == "ready"

@@ -637,3 +637,65 @@ async def test_stateless_session_never_writes_to_disk_even_after_resume(tmp_path
     mgr.stop(sid)
     assert store.list_sessions() == []
     assert mgr.status(sid).status == SessionStatus.STOPPED
+
+
+@pytest.mark.parametrize("operation", ["pause", "stop", "resume"])
+async def test_external_manager_control_fences_inflight_supervisor_checkpoint(tmp_path, operation):
+    from agenthandler.store import SqliteStore
+
+    path = str(tmp_path / "state.db")
+    owner = SessionManager(SqliteStore(path))
+    control = SessionManager(SqliteStore(path))
+    sid = owner.start("agent", POLICY)
+    old = owner.get_supervisor(sid)
+    old.record_tokens(2)
+    expected = None
+
+    async def inflight():
+        nonlocal expected
+        if operation == "resume":
+            replacement = control.resume(sid)
+            assert replacement.resume_count == 1
+            replacement.record_tokens(5)
+        else:
+            getattr(control, operation)(sid)
+        expected = control.status(sid)
+        # An old SDK continuation must not overwrite the replacement's counters.
+        old.record_tokens(10)
+        return "external effect completed"
+
+    assert (await old.call("inflight", inflight)).succeeded
+    assert owner.status(sid) == expected
+    assert old.resume_count == 0
+    assert old.paused
+    assert not old.supports_atomic_checkpoints
+    assert (await old.call("again", good_tool)).error.kind == "agent_paused"
+
+
+def test_custom_store_without_atomic_capability_never_gets_unsafe_checkpoint_replacement():
+    class LegacyStore:
+        def __init__(self):
+            self.inner = MemoryStore()
+            self.saves = 0
+
+        def save_checkpoint(self, checkpoint):
+            self.saves += 1
+            self.inner.save_checkpoint(checkpoint)
+
+        def load_checkpoint(self, session_id):
+            return self.inner.load_checkpoint(session_id)
+
+        def list_sessions(self):
+            return self.inner.list_sessions()
+
+        def delete_session(self, session_id):
+            return self.inner.delete_session(session_id)
+
+    store = LegacyStore()
+    manager = SessionManager(store)
+    sid = manager.start("agent", POLICY)
+    supervisor = manager.get_supervisor(sid)
+    assert not supervisor.supports_atomic_checkpoints
+    supervisor.record_tokens(1)
+    assert store.saves == 1
+    assert manager.status(sid).tokens_used == 0

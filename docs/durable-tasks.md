@@ -124,7 +124,16 @@ can continue. Blocked tasks may be retried with the same ID after resolving the
 cause; all prior reservations remain charged. Each authorized `run()` invocation
 starts a fresh request deadline, including retries in the same worker. This does
 not reset lifetime task or Supervisor budgets, and does not unpause or restart an
-operator-stopped session.
+operator-stopped session. Lifecycle authorization is rechecked immediately before
+callbacks and before accepting verification. A stop or pause does not forcibly
+interrupt an already-running callback; its known action output is retained, but
+later phases and verified completion are blocked. Resuming replaces the session
+generation, so an older in-flight worker cannot certify the resumed job.
+
+Durable execution requires a store with atomic, generation-checked supervisor
+updates (`update_supervisor_checkpoint`); the built-in `MemoryStore` and
+`SqliteStore` provide this capability. Custom stores must implement the same
+contract before they can be used with the durable runner.
 
 ## Budgets and concurrency
 
