@@ -51,6 +51,8 @@ async def test_complete_and_resume_without_replaying(tmp_path):
     assert result.completed
     assert result.next_milestone is None
     assert result.calls_reserved == 2
+    assert runner.manager.status(task.session_id).status.value == "stopped"
+    assert runner.manager.get_supervisor(task.session_id) is None
     assert (
         result.milestones["report"]["verification"]["evidence"]["checked"]["artifact"] == "report"
     )
@@ -62,6 +64,25 @@ async def test_complete_and_resume_without_replaying(tmp_path):
     replay = await fresh.run(task.task_id, [replace(steps[0], execute=never, verify=never)])
     assert replay.completed
     assert replay.calls_reserved == 2
+
+
+async def test_resume_repairs_crash_between_completion_and_session_cleanup(tmp_path, monkeypatch):
+    runner = runner_at(tmp_path)
+    step = milestone()
+    task = runner.create("agent", "Write report", [step])
+
+    def crash(session_id):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(runner.manager, "stop", crash)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(task.task_id, [step])
+    assert runner.store.load(task.task_id).completed
+    fresh = runner_at(tmp_path)
+    result = await fresh.run(task.task_id, [step])
+    assert result.completed
+    assert result.calls_reserved == 2
+    assert fresh.manager.status(task.session_id).status.value == "stopped"
 
 
 async def test_fresh_context_resumes_next_milestone_with_original_inputs(tmp_path):
@@ -382,3 +403,58 @@ async def test_real_process_death_after_external_commit(tmp_path):
     assert result.calls_reserved == 3
     assert result.tokens_reserved == 10
     assert result.cost_reserved_microusd == 20
+
+
+async def test_same_worker_retry_refreshes_deadline_without_resetting_budget(tmp_path):
+    attempts = []
+    effects = []
+    runner = runner_at(tmp_path)
+
+    async def execute(ctx):
+        effects.append(ctx.operation_id)
+        return await action(ctx)
+
+    async def reject_once(ctx):
+        attempts.append(ctx.operation_id)
+        return VerificationResult(len(attempts) > 1, {"checks": len(attempts)})
+
+    step = replace(milestone(), execute=execute, verify=reject_once)
+    task = runner.create(
+        "agent",
+        "Write report",
+        [step],
+        policy_dict={"max_iterations": 10, "request_timeout": 1, "token_budget": 20},
+    )
+    sv = runner.manager.get_supervisor(task.session_id)
+    sv.record_tokens(7)
+    first = await runner.run(task.task_id, [step])
+    assert not first.completed
+    assert first.calls_reserved == 2
+    # Time passing between attempts must not make the next authorized run dead.
+    sv._start_time -= 2
+    second = await runner.run(task.task_id, [step])
+    assert second.completed
+    assert second.calls_reserved == 3
+    assert len(effects) == 1
+    assert attempts[0] == attempts[1]
+    assert sv.budget().tokens_used == 7
+    assert sv.budget().iterations == 3
+    assert runner.manager.status(task.session_id).resume_count == 0
+
+
+async def test_fresh_attempt_cannot_replenish_persistent_budget(tmp_path):
+    async def reject(ctx):
+        return VerificationResult(False, {"test": "failed"})
+
+    runner = runner_at(tmp_path)
+    step = replace(milestone(), verify=reject)
+    task = runner.create("agent", "Write report", [step], limits=TaskLimits(max_calls=2))
+    first = await runner.run(task.task_id, [step])
+    assert first.calls_reserved == 2
+    sv = runner.manager.get_supervisor(task.session_id)
+    sv._start_time -= sv.policy.request_timeout + 1
+    retry = await runner.run(task.task_id, [step])
+    assert not retry.completed
+    assert retry.reason == "Task budget exhausted"
+    assert retry.calls_reserved == 2
+    assert sv.budget().iterations == 2

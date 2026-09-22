@@ -83,7 +83,10 @@ All milestones must pass their validators before the task is verified. For
 cross-milestone requirements or artifacts that can change over time, include a
 final milestone whose validator checks the entire delivered result. Evidence is
 a record of a check at execution time, not a promise that an external artifact
-can never change. A completed task returns its stored result without new calls.
+can never change. A completed task returns its stored result without new calls. Its underlying
+session is stopped and its in-memory supervisor released. If a process dies
+between recording completion and closing the session, resuming the completed
+task repairs that cleanup without replaying work.
 
 ## Recover uncertain operations
 
@@ -118,7 +121,10 @@ the task; this runner does not implement durable approval continuation.
 A paused/stopped session is not automatically authorized by a fresh worker. The
 application must explicitly resume it through SessionManager before the task
 can continue. Blocked tasks may be retried with the same ID after resolving the
-cause; all prior reservations remain charged.
+cause; all prior reservations remain charged. Each authorized `run()` invocation
+starts a fresh request deadline, including retries in the same worker. This does
+not reset lifetime task or Supervisor budgets, and does not unpause or restart an
+operator-stopped session.
 
 ## Budgets and concurrency
 

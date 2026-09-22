@@ -187,6 +187,22 @@ class Supervisor:
             )
         return self._circuit_breakers[tool_name]
 
+    def begin_request(self) -> None:
+        """Start an application-authorized attempt with a fresh request deadline.
+
+        Lifetime token/iteration budgets, policy, circuit breakers, and operator
+        pause state are preserved. Call once at an outer request boundary, never
+        once per tool call. DurableTaskRunner also checks persisted session state
+        before opening an attempt; this method does not authorize session resume.
+        """
+        self._check_paused()
+        self._start_time = time.monotonic()
+        self._audit.record(
+            AuditPhase.REQUEST_START,
+            AuditOutcome.INFO,
+            detail="New request attempt; existing lifetime budgets preserved",
+        )
+
     def _check_request_timeout(self) -> None:
         """Check if the overall request has timed out."""
         elapsed = time.monotonic() - self._start_time
