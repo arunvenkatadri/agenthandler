@@ -91,6 +91,12 @@ from .task import (
     TaskRecord,
 )
 from .triggers import DbWatchEntry, Scheduler, WebhookTrigger
+from .verification import (
+    VerificationGate,
+    VerificationReport,
+    VerificationStageResult,
+    VerificationStatus,
+)
 
 try:
     from .mcp_server import SupervisedMCPServer
@@ -126,6 +132,10 @@ __all__ = [
     "TaskContext",
     "TaskLimits",
     "TaskRecord",
+    "VerificationGate",
+    "VerificationReport",
+    "VerificationStageResult",
+    "VerificationStatus",
     "Policy",
     "OnFailure",
     "Action",
