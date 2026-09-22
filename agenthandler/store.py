@@ -248,6 +248,20 @@ class MemoryStore:
                 return True
             return False
 
+    def delete_expired(self, max_age_seconds: float) -> int:
+        """Remove checkpoints by creation age, matching SqliteStore expiry."""
+        cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        with self._lock:
+            expired = [
+                sid
+                for sid, cp in self._data.items()
+                if cp.created_at and cp.created_at < cutoff_iso
+            ]
+            for sid in expired:
+                del self._data[sid]
+            return len(expired)
+
 
 # ---------------------------------------------------------------------------
 # SqliteStore — stdlib sqlite3, production default

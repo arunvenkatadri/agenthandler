@@ -899,3 +899,36 @@ def test_paused_overbudget_usage_persists_before_error_and_fresh_resume(tmp_path
     resumed = SessionManager(store()).resume(sid)
     assert resumed.budget().tokens_used == (4 if usage == "tokens" else 0)
     assert resumed.budget().iterations == (2 if usage == "iterations" else 0)
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_expiration_releases_stateless_checkpoints_and_bookkeeping(tmp_path, terminal):
+    from agenthandler import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "sessions.db"))
+    manager = SessionManager(store)
+    expired = manager.start("request", POLICY, {"private": "large payload"}, stateless=True)
+    supervisor = manager.get_supervisor(expired)
+    if terminal:
+        manager.stop(expired)
+    checkpoint = manager.status(expired)
+    checkpoint.created_at = "2000-01-01T00:00:00+00:00"
+    manager._ephemeral_store.save_checkpoint(checkpoint)
+    recent = manager.start("recent", POLICY, stateless=True)
+    persistent = manager.start("persistent", POLICY)
+    old = manager.status(persistent)
+    old.created_at = checkpoint.created_at
+    store.save_checkpoint(old)
+    assert manager.delete_expired(86400) == 2
+    assert manager.status(expired) is None
+    assert manager.status(persistent) is None
+    assert manager.status(recent) is not None
+    assert supervisor.paused
+    assert expired not in manager._stateless_sessions
+    assert expired not in manager._session_locks
+    assert manager.get_supervisor(expired) is None
+    assert expired not in manager._audit_sinks
+    assert expired not in manager._audit_baselines
+    assert expired not in manager._original_policies
+    assert [cp.session_id for cp in manager.list_sessions()] == [recent]
+    assert manager.delete_expired(86400) == 0

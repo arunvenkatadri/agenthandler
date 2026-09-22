@@ -492,10 +492,25 @@ class SessionManager:
 
     def delete_expired(self, max_age_seconds: float) -> int:
         """Delete sessions older than max_age_seconds."""
+        count = 0
         if hasattr(self._store, "delete_expired"):
-            count: int = self._store.delete_expired(max_age_seconds)
-            return count
-        return 0
+            count = self._store.delete_expired(max_age_seconds)
+        with self._ephemeral_store.session_transaction():
+            before = {cp.session_id for cp in self._ephemeral_store.list_sessions()}
+            count += self._ephemeral_store.delete_expired(max_age_seconds)
+            remaining = {cp.session_id for cp in self._ephemeral_store.list_sessions()}
+            with self._lock:
+                for sid in before - remaining:
+                    retired = self._supervisors.pop(sid, None)
+                    if retired is not None:
+                        retired.paused = True
+                        retired._store = None
+                    self._audit_sinks.pop(sid, None)
+                    self._audit_baselines.pop(sid, None)
+                    self._original_policies.pop(sid, None)
+                    self._session_locks.pop(sid, None)
+                    self._stateless_sessions.discard(sid)
+        return count
 
     def _persist_audit(self, session_id: str, cp: Checkpoint) -> None:
         """Flush in-memory audit entries into the checkpoint for persistence."""
