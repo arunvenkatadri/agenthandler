@@ -1,0 +1,215 @@
+"""Approval queue — human-in-the-loop confirmation for dangerous tool calls.
+
+When a tool is in the policy's require_confirm list, the Supervisor queues
+the call here instead of blocking it outright. The call stays pending until
+a human approves or denies it via the REST API, dashboard, or any client
+listening on the WebSocket events stream.
+
+Usage (internal — SessionManager wires this up automatically):
+
+    queue = ApprovalQueue()
+    approval_id = queue.submit("delete_file", {"path": "/tmp/data"}, session_id)
+    # ... user reviews and approves via REST ...
+    queue.approve(approval_id)
+    # ... or denies ...
+    queue.deny(approval_id, reason="Too risky")
+"""
+
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
+
+class ApprovalStatus(Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+    REVOKED = "revoked"  # withdrawn before it was used
+
+
+@dataclass
+class ApprovalRequest:
+    """A pending tool call awaiting human approval."""
+
+    approval_id: str
+    session_id: str
+    tool_name: str
+    tool_args: Dict[str, Any]
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    created_at: str = ""
+    resolved_at: str = ""
+    resolved_by: str = ""  # who approved/denied (for audit)
+    deny_reason: str = ""
+    expires_at: Optional[float] = None  # POSIX seconds; None never expires
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now(timezone.utc).isoformat()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "approval_id": self.approval_id,
+            "session_id": self.session_id,
+            "tool_name": self.tool_name,
+            "tool_args": {k: str(v)[:200] for k, v in self.tool_args.items()},
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "resolved_at": self.resolved_at,
+            "resolved_by": self.resolved_by,
+            "deny_reason": self.deny_reason,
+            "expires_at": self.expires_at,
+        }
+
+
+class ApprovalQueue:
+    """Thread-safe queue of pending tool call approvals.
+
+    One queue per SessionManager — holds approvals for all sessions.
+
+    Args:
+        max_requests: Maximum number of requests to keep. When exceeded,
+                      oldest resolved (non-pending) requests are evicted.
+                      New submissions are rejected if the queue is full
+                      even after eviction.
+    """
+
+    def __init__(
+        self, max_requests: int = 10000, *, clock: Callable[[], float] = time.time
+    ) -> None:
+        self._requests: Dict[str, ApprovalRequest] = {}
+        self._max_requests = max_requests
+        self._lock = threading.Lock()
+        self._clock = clock
+
+    def _expire(self, req: ApprovalRequest) -> None:
+        """Mark a pending or approved (unused) request past its expiry. Must hold _lock."""
+        if (
+            req.expires_at is not None
+            and req.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
+            and self._clock() >= req.expires_at
+        ):
+            req.status = ApprovalStatus.EXPIRED
+            req.resolved_at = datetime.now(timezone.utc).isoformat()
+
+    def _evict_resolved(self) -> None:
+        """Remove oldest resolved requests to make room. Must hold _lock."""
+        resolved = [
+            (aid, req)
+            for aid, req in self._requests.items()
+            if req.status != ApprovalStatus.PENDING
+        ]
+        # Sort by resolved_at (or created_at as fallback) so oldest go first
+        resolved.sort(key=lambda pair: pair[1].resolved_at or pair[1].created_at)
+        to_remove = len(self._requests) - self._max_requests + 1
+        for aid, _ in resolved[:to_remove]:
+            del self._requests[aid]
+
+    def submit(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        session_id: str,
+        *,
+        ttl_s: Optional[float] = None,
+    ) -> ApprovalRequest:
+        """Queue a tool call for approval. Returns the ApprovalRequest.
+
+        With ``ttl_s`` the request (and an approval of it) expires that many
+        seconds from now: it can no longer be approved or used.
+
+        Raises RuntimeError if the queue is full and cannot evict enough
+        resolved requests to make room.
+        """
+        req = ApprovalRequest(
+            approval_id=secrets.token_hex(8),
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            expires_at=self._clock() + ttl_s if ttl_s is not None else None,
+        )
+        with self._lock:
+            if len(self._requests) >= self._max_requests:
+                self._evict_resolved()
+                if len(self._requests) >= self._max_requests:
+                    raise RuntimeError(
+                        f"Approval queue full ({self._max_requests} requests). "
+                        "Resolve existing approvals before submitting new ones."
+                    )
+            self._requests[req.approval_id] = req
+        return req
+
+    def get(self, approval_id: str) -> Optional[ApprovalRequest]:
+        with self._lock:
+            req = self._requests.get(approval_id)
+            if req is not None:
+                self._expire(req)
+            return req
+
+    def approve(self, approval_id: str, approved_by: str = "") -> Optional[ApprovalRequest]:
+        """Approve a pending request. Returns the request, or None if not found."""
+        with self._lock:
+            req = self._requests.get(approval_id)
+            if req is not None:
+                self._expire(req)
+            if req is None or req.status != ApprovalStatus.PENDING:
+                return None
+            req.status = ApprovalStatus.APPROVED
+            req.resolved_at = datetime.now(timezone.utc).isoformat()
+            req.resolved_by = approved_by
+            return req
+
+    def deny(
+        self, approval_id: str, reason: str = "", denied_by: str = ""
+    ) -> Optional[ApprovalRequest]:
+        """Deny a pending request. Returns the request, or None if not found."""
+        with self._lock:
+            req = self._requests.get(approval_id)
+            if req is not None:
+                self._expire(req)
+            if req is None or req.status != ApprovalStatus.PENDING:
+                return None
+            req.status = ApprovalStatus.DENIED
+            req.deny_reason = reason
+            req.resolved_at = datetime.now(timezone.utc).isoformat()
+            req.resolved_by = denied_by
+            return req
+
+    def revoke(self, approval_id: str, revoked_by: str = "") -> Optional[ApprovalRequest]:
+        """Withdraw a pending or approved request before it is used.
+
+        Returns the request, or None if it is unknown or already denied,
+        expired or revoked. A revoked approval can never be used.
+        """
+        with self._lock:
+            req = self._requests.get(approval_id)
+            if req is not None:
+                self._expire(req)
+            if req is None or req.status not in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+                return None
+            req.status = ApprovalStatus.REVOKED
+            req.resolved_at = datetime.now(timezone.utc).isoformat()
+            req.resolved_by = revoked_by
+            return req
+
+    def list_pending(self, session_id: Optional[str] = None) -> List[ApprovalRequest]:
+        """List pending approvals, optionally filtered by session."""
+        with self._lock:
+            reqs = list(self._requests.values())
+            for req in reqs:
+                self._expire(req)
+        if session_id is not None:
+            reqs = [r for r in reqs if r.session_id == session_id]
+        return [r for r in reqs if r.status == ApprovalStatus.PENDING]
+
+    def list_all(self, session_id: Optional[str] = None) -> List[ApprovalRequest]:
+        """List all approvals (any status), optionally filtered by session."""
+        with self._lock:
+            reqs = list(self._requests.values())
+        if session_id is not None:
+            reqs = [r for r in reqs if r.session_id == session_id]
+        return reqs

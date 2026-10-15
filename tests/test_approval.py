@@ -1,0 +1,345 @@
+"""Tests for agenthandler approval flow — human-in-the-loop confirmation."""
+
+import pytest
+
+from agenthandler.approval import ApprovalQueue, ApprovalStatus
+from agenthandler.session import SessionManager
+from agenthandler.store import MemoryStore
+
+try:
+    from fastapi.testclient import TestClient
+
+    from agenthandler.server import create_app
+
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+POLICY_WITH_CONFIRM = {
+    "max_iterations": 5,
+    "tool_timeout": 10,
+    "require_confirm": ["delete_file", "send_email"],
+}
+
+
+async def delete_file(path: str = "/tmp/data") -> str:
+    return f"Deleted {path}"
+
+
+async def safe_tool(query: str = "test") -> str:
+    return f"result for {query}"
+
+
+# ---------------------------------------------------------------------------
+# ApprovalQueue unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalQueue:
+    def test_submit_creates_pending(self):
+        q = ApprovalQueue()
+        req = q.submit("delete_file", {"path": "/tmp"}, "session-1")
+        assert req.status == ApprovalStatus.PENDING
+        assert req.tool_name == "delete_file"
+        assert req.session_id == "session-1"
+
+    def test_approve(self):
+        q = ApprovalQueue()
+        req = q.submit("delete_file", {"path": "/tmp"}, "s1")
+        result = q.approve(req.approval_id, approved_by="admin")
+        assert result.status == ApprovalStatus.APPROVED
+        assert result.resolved_by == "admin"
+
+    def test_deny(self):
+        q = ApprovalQueue()
+        req = q.submit("delete_file", {"path": "/tmp"}, "s1")
+        result = q.deny(req.approval_id, reason="Too risky")
+        assert result.status == ApprovalStatus.DENIED
+        assert result.deny_reason == "Too risky"
+
+    def test_approve_nonexistent_returns_none(self):
+        q = ApprovalQueue()
+        assert q.approve("nope") is None
+
+    def test_deny_nonexistent_returns_none(self):
+        q = ApprovalQueue()
+        assert q.deny("nope") is None
+
+    def test_cannot_approve_already_denied(self):
+        q = ApprovalQueue()
+        req = q.submit("delete_file", {}, "s1")
+        q.deny(req.approval_id)
+        assert q.approve(req.approval_id) is None
+
+    def test_list_pending(self):
+        q = ApprovalQueue()
+        q.submit("tool_a", {}, "s1")
+        q.submit("tool_b", {}, "s1")
+        q.submit("tool_c", {}, "s2")
+        assert len(q.list_pending("s1")) == 2
+        assert len(q.list_pending("s2")) == 1
+        assert len(q.list_pending()) == 3
+
+    def test_list_pending_excludes_resolved(self):
+        q = ApprovalQueue()
+        req = q.submit("tool_a", {}, "s1")
+        q.approve(req.approval_id)
+        assert len(q.list_pending("s1")) == 0
+        assert len(q.list_all("s1")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Supervisor integration — require_confirm with approval queue
+# ---------------------------------------------------------------------------
+
+
+class TestSupervisorApproval:
+    @pytest.mark.asyncio
+    async def test_confirmed_tool_queues_approval(self):
+        store = MemoryStore()
+        mgr = SessionManager(store)
+        sid = mgr.start("agent-1", POLICY_WITH_CONFIRM)
+        sv = mgr.get_supervisor(sid)
+
+        result = await sv.call("delete_file", delete_file, path="/tmp/data")
+        assert result.succeeded is False
+        assert result.error.kind == "approval_pending"
+        assert "approval_id" in result.error.details
+
+        # Check it's in the queue
+        pending = mgr.approval_queue.list_pending(sid)
+        assert len(pending) == 1
+        assert pending[0].tool_name == "delete_file"
+
+    @pytest.mark.asyncio
+    async def test_safe_tool_not_affected(self):
+        store = MemoryStore()
+        mgr = SessionManager(store)
+        sid = mgr.start("agent-1", POLICY_WITH_CONFIRM)
+        sv = mgr.get_supervisor(sid)
+
+        result = await sv.call("search", safe_tool, query="test")
+        assert result.succeeded is True
+
+    @pytest.mark.asyncio
+    async def test_execute_after_approval(self):
+        store = MemoryStore()
+        mgr = SessionManager(store)
+        sid = mgr.start("agent-1", POLICY_WITH_CONFIRM)
+        sv = mgr.get_supervisor(sid)
+
+        # Tool call gets queued
+        result = await sv.call("delete_file", delete_file, path="/important")
+        approval_id = result.error.details["approval_id"]
+
+        # Approve it
+        mgr.approval_queue.approve(approval_id)
+
+        # Execute the approved call
+        result = await sv.execute_approved(approval_id, delete_file)
+        assert result.succeeded is True
+        assert result.output == "Deleted /important"
+
+    @pytest.mark.asyncio
+    async def test_execute_denied_returns_error(self):
+        store = MemoryStore()
+        mgr = SessionManager(store)
+        sid = mgr.start("agent-1", POLICY_WITH_CONFIRM)
+        sv = mgr.get_supervisor(sid)
+
+        result = await sv.call("delete_file", delete_file, path="/tmp")
+        approval_id = result.error.details["approval_id"]
+
+        mgr.approval_queue.deny(approval_id, reason="Not safe")
+
+        result = await sv.execute_approved(approval_id, delete_file)
+        assert result.succeeded is False
+        assert result.error.kind == "approval_denied"
+        assert "Not safe" in str(result.error)
+
+    @pytest.mark.asyncio
+    async def test_execute_still_pending_returns_pending(self):
+        store = MemoryStore()
+        mgr = SessionManager(store)
+        sid = mgr.start("agent-1", POLICY_WITH_CONFIRM)
+        sv = mgr.get_supervisor(sid)
+
+        result = await sv.call("delete_file", delete_file, path="/tmp")
+        approval_id = result.error.details["approval_id"]
+
+        # Try to execute before approval
+        result = await sv.execute_approved(approval_id, delete_file)
+        assert result.succeeded is False
+        assert result.error.kind == "approval_pending"
+
+
+# ---------------------------------------------------------------------------
+# REST API — approval endpoints
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_FASTAPI, reason="fastapi not installed")
+class TestApprovalREST:
+    def _make_client(self):
+        store = MemoryStore()
+        manager = SessionManager(store)
+        app = create_app(manager)
+        return TestClient(app), manager
+
+    def test_list_approvals_empty(self):
+        client, mgr = self._make_client()
+        resp = client.post("/sessions", json={"agent_id": "a"})
+        sid = resp.json()["session_id"]
+        resp = client.get(f"/sessions/{sid}/approvals")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_full_approval_flow_via_rest(self):
+        client, mgr = self._make_client()
+        # Create session with require_confirm
+        resp = client.post(
+            "/sessions",
+            json={"agent_id": "a", "policy": POLICY_WITH_CONFIRM},
+        )
+        sid = resp.json()["session_id"]
+
+        # Simulate a tool call that needs approval (via the manager directly)
+        sv = mgr.get_supervisor(sid)
+        import asyncio
+
+        result = asyncio.run(sv.call("delete_file", delete_file, path="/tmp"))
+        assert result.error.kind == "approval_pending"
+        approval_id = result.error.details["approval_id"]
+
+        # List approvals via REST
+        resp = client.get(f"/sessions/{sid}/approvals")
+        assert resp.status_code == 200
+        approvals = resp.json()
+        assert len(approvals) == 1
+        assert approvals[0]["status"] == "pending"
+        assert approvals[0]["tool_name"] == "delete_file"
+
+        # Approve via REST
+        resp = client.post(f"/sessions/{sid}/approvals/{approval_id}/approve")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "approved"
+
+        # Verify it's no longer pending
+        resp = client.get(f"/sessions/{sid}/approvals")
+        pending = [a for a in resp.json() if a["status"] == "pending"]
+        assert len(pending) == 0
+
+    def test_deny_via_rest(self):
+        client, mgr = self._make_client()
+        resp = client.post(
+            "/sessions",
+            json={"agent_id": "a", "policy": POLICY_WITH_CONFIRM},
+        )
+        sid = resp.json()["session_id"]
+        sv = mgr.get_supervisor(sid)
+
+        import asyncio
+
+        result = asyncio.run(sv.call("send_email", delete_file, path="test"))
+        approval_id = result.error.details["approval_id"]
+
+        resp = client.post(
+            f"/sessions/{sid}/approvals/{approval_id}/deny",
+            json={"reason": "Not authorized"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "denied"
+        assert resp.json()["deny_reason"] == "Not authorized"
+
+    def test_approve_nonexistent_returns_404(self):
+        client, _ = self._make_client()
+        resp = client.post("/sessions", json={"agent_id": "a"})
+        sid = resp.json()["session_id"]
+        resp = client.post(f"/sessions/{sid}/approvals/fake-id/approve")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Expiry and revocation in the core queue
+# ---------------------------------------------------------------------------
+
+
+class TestExpiryAndRevocation:
+    def test_an_expired_request_cannot_be_approved(self):
+        clock = [1000.0]
+        q = ApprovalQueue(clock=lambda: clock[0])
+        req = q.submit("delete_file", {"path": "/tmp"}, "s1", ttl_s=10)
+        assert req.expires_at == 1010.0
+        clock[0] = 1010.0
+        assert q.approve(req.approval_id) is None
+        assert q.get(req.approval_id).status == ApprovalStatus.EXPIRED
+        assert q.list_pending("s1") == []
+
+    def test_an_approved_request_expires_too(self):
+        clock = [1000.0]
+        q = ApprovalQueue(clock=lambda: clock[0])
+        req = q.submit("delete_file", {}, "s1", ttl_s=10)
+        assert q.approve(req.approval_id) is not None
+        clock[0] = 1011.0
+        assert q.get(req.approval_id).status == ApprovalStatus.EXPIRED
+
+    @pytest.mark.asyncio
+    async def test_the_supervisor_applies_the_policys_approval_ttl(self):
+        # The core Supervisor honours Policy.approval_ttl_s / approval_ttls.
+        mgr = SessionManager(MemoryStore())
+        policy = {**POLICY_WITH_CONFIRM, "approval_ttl_s": 60, "approval_ttls": {"send_email": 5}}
+        sid = mgr.start("agent-1", policy)
+        sv = mgr.get_supervisor(sid)
+        first = await sv.call("delete_file", delete_file, path="/x")
+        second = await sv.call("send_email", delete_file, path="/y")
+        a = mgr.approval_queue.get(first.error.details["approval_id"])
+        b = mgr.approval_queue.get(second.error.details["approval_id"])
+        assert a.expires_at is not None and b.expires_at is not None
+        assert 54 < a.expires_at - b.expires_at < 56
+
+    def test_without_a_ttl_nothing_expires(self):
+        q = ApprovalQueue()
+        req = q.submit("delete_file", {}, "s1")
+        assert req.expires_at is None
+        assert q.approve(req.approval_id) is not None
+
+    def test_revoke_pending_or_approved_but_not_denied(self):
+        q = ApprovalQueue()
+        pending = q.submit("delete_file", {}, "s1")
+        approved = q.submit("delete_file", {}, "s1")
+        denied = q.submit("delete_file", {}, "s1")
+        q.approve(approved.approval_id)
+        q.deny(denied.approval_id)
+        assert q.revoke(pending.approval_id, revoked_by="ann").status == ApprovalStatus.REVOKED
+        assert q.revoke(approved.approval_id).status == ApprovalStatus.REVOKED
+        assert q.revoke(denied.approval_id) is None
+        assert q.revoke("missing") is None
+        assert q.get(pending.approval_id).resolved_by == "ann"
+
+    @pytest.mark.asyncio
+    async def test_a_revoked_or_expired_approval_never_runs(self):
+        mgr = SessionManager(MemoryStore())
+        sid = mgr.start("agent-1", POLICY_WITH_CONFIRM)
+        sv = mgr.get_supervisor(sid)
+        ran = []
+
+        async def tracked(path):
+            ran.append(path)
+            return "deleted"
+
+        first = await sv.call("delete_file", tracked, path="/x")
+        approval_id = first.error.details["approval_id"]
+        mgr.approval_queue.approve(approval_id)
+        mgr.approval_queue.revoke(approval_id)
+        result = await sv.call_approved(approval_id, "delete_file", tracked, path="/x")
+        assert not result.succeeded and ran == []
+        second = await sv.call("delete_file", tracked, path="/y")
+        expiring = mgr.approval_queue.get(second.error.details["approval_id"])
+        mgr.approval_queue.approve(expiring.approval_id)
+        expiring.expires_at = 0.0  # long past
+        result = await sv.call_approved(expiring.approval_id, "delete_file", tracked, path="/y")
+        assert not result.succeeded and ran == []

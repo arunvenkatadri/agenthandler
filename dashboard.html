@@ -1,0 +1,4312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentHandler Dashboard</title>
+  <style>
+    :root {
+      --bg: #1a1b1e;
+      --surface: #25262b;
+      --surface2: #2c2e33;
+      --border: #373a40;
+      --text: #e8e8e8;
+      --muted: #868e96;
+      --accent: #4dabf7;
+      --accent-dim: #339af0;
+      --green: #51cf66;
+      --yellow: #fcc419;
+      --red: #fa5252;
+      --orange: #ff922b;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* -- Top bar -- */
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0.6rem 1rem;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.75rem;
+    }
+    .topbar h1 { font-size: 1.1rem; font-weight: 600; white-space: nowrap; }
+    .topbar .actions { display: flex; gap: 0.5rem; align-items: center; }
+    .topbar button {
+      font-size: 0.8rem; padding: 0.3rem 0.65rem; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--text);
+      cursor: pointer; text-decoration: none; white-space: nowrap;
+    }
+    .topbar button:hover { background: var(--border); }
+
+    /* -- Tab nav -- */
+    .tabs {
+      display: flex; gap: 0; border-bottom: 1px solid var(--border);
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+      scrollbar-width: none; background: var(--surface);
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      padding: 0.6rem 1rem; font-size: 0.85rem; cursor: pointer;
+      white-space: nowrap; border-bottom: 2px solid transparent;
+      color: var(--muted); transition: color 0.15s, border-color 0.15s;
+      background: none; border-top: none; border-left: none; border-right: none;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* -- Content area -- */
+    .content { padding: 1rem; max-width: 960px; margin: 0 auto; }
+    .section { display: none; }
+    .section.active { display: block; }
+
+    /* -- Cards -- */
+    .card-grid {
+      display: grid; gap: 0.75rem;
+      grid-template-columns: 1fr;
+    }
+    @media (min-width: 640px) {
+      .card-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 0.85rem 1rem; overflow: hidden;
+    }
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+    .card-header-left {
+      display: flex; align-items: center; gap: 0.4rem;
+      min-width: 0; flex: 1;
+    }
+    .card-header-right {
+      display: flex; align-items: center; gap: 0.35rem;
+      flex-shrink: 0;
+    }
+    .card-title { font-size: 0.95rem; font-weight: 600; }
+    .badge {
+      font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 99px;
+      font-weight: 500;
+    }
+    .badge-blue { background: rgba(77,171,247,0.2); color: var(--accent); }
+    .badge-green { background: rgba(81,207,102,0.2); color: var(--green); }
+    .badge-yellow { background: rgba(252,196,25,0.2); color: var(--yellow); }
+    .badge-red { background: rgba(250,82,82,0.2); color: var(--red); }
+    .badge-orange { background: rgba(255,146,43,0.2); color: var(--orange); }
+    .badge-muted { background: var(--surface2); color: var(--muted); }
+
+    .card-desc {
+      font-size: 0.82rem; color: var(--muted); margin-bottom: 0.5rem;
+      line-height: 1.4;
+    }
+
+    /* -- Tags -- */
+    .tags { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.4rem; }
+    .tag {
+      font-size: 0.7rem; padding: 0.15rem 0.45rem; border-radius: 4px;
+      background: var(--surface2); color: var(--muted); border: 1px solid var(--border);
+    }
+    .tag-skill {
+      background: rgba(77,171,247,0.15); color: var(--accent); border-color: rgba(77,171,247,0.3);
+    }
+    .tag-policy {
+      background: rgba(255,146,43,0.15); color: var(--orange); border-color: rgba(255,146,43,0.3);
+    }
+
+    /* -- Detail rows -- */
+    .detail-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.3rem 0; font-size: 0.8rem;
+      border-top: 1px solid var(--border);
+    }
+    .detail-row:first-child { border-top: none; }
+    .detail-label { color: var(--muted); }
+    .detail-value { font-weight: 500; text-align: right; }
+
+    /* -- Collapsible -- */
+    .collapsible-header {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.8rem; color: var(--muted); cursor: pointer;
+      padding: 0.3rem 0; user-select: none;
+    }
+    .collapsible-header .arrow { transition: transform 0.2s; font-size: 0.65rem; }
+    .collapsible-header.open .arrow { transform: rotate(90deg); }
+    .collapsible-body { display: none; padding-left: 0.5rem; }
+    .collapsible-body.open { display: block; }
+    .tool-item {
+      font-size: 0.78rem; padding: 0.25rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .tool-item:last-child { border-bottom: none; }
+    .tool-name { font-weight: 600; color: var(--text); }
+    .tool-desc { color: var(--muted); font-size: 0.75rem; }
+    .param-list { padding-left: 0.75rem; margin-top: 0.15rem; }
+    .param { font-size: 0.72rem; color: var(--muted); }
+    .param .pname { color: var(--accent); }
+    .param .ptype { color: var(--orange); }
+    .param .preq { color: var(--red); font-size: 0.65rem; }
+
+    /* -- Supervision box -- */
+    .supervision-box {
+      background: var(--surface2); border-radius: 6px;
+      padding: 0.5rem 0.65rem; margin-top: 0.4rem;
+    }
+    .supervision-box .label {
+      font-size: 0.7rem; color: var(--accent); font-weight: 600;
+      margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    /* -- Status dots -- */
+    .dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 0.3rem; vertical-align: middle;
+    }
+    .dot-green { background: var(--green); }
+    .dot-red { background: var(--red); }
+    .dot-yellow { background: var(--yellow); }
+    .dot-gray { background: var(--muted); }
+
+    /* -- System overview cards -- */
+    .sys-grid {
+      display: grid; gap: 0.5rem;
+      grid-template-columns: repeat(2, 1fr);
+    }
+    @media (min-width: 640px) {
+      .sys-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+    .sys-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.65rem 0.8rem; text-align: center;
+    }
+    .sys-card .sys-value {
+      font-size: 1.1rem; font-weight: 700; margin-bottom: 0.15rem;
+    }
+    .sys-card .sys-label { font-size: 0.72rem; color: var(--muted); }
+
+    /* -- Budget bar -- */
+    .budget-bar {
+      background: var(--surface2); border-radius: 6px; height: 6px;
+      overflow: hidden; margin-top: 0.3rem;
+    }
+    .budget-fill {
+      height: 100%; border-radius: 6px; transition: width 0.3s;
+    }
+    .budget-fill.ok { background: var(--green); }
+    .budget-fill.warn { background: var(--yellow); }
+    .budget-fill.over { background: var(--red); }
+
+    /* -- Cost table -- */
+    .cost-table { width: 100%; font-size: 0.8rem; border-collapse: collapse; }
+    .cost-table th {
+      text-align: left; padding: 0.4rem 0.5rem; color: var(--muted);
+      border-bottom: 1px solid var(--border); font-weight: 500;
+    }
+    .cost-table td {
+      padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border);
+    }
+    .cost-table .money { text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* -- Budget form -- */
+    .budget-form {
+      display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;
+      margin-top: 0.75rem;
+    }
+    .budget-form input, .budget-form select {
+      padding: 0.35rem 0.5rem; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg);
+      color: var(--text); font-size: 0.82rem;
+    }
+    .budget-form input { width: 100px; }
+    .budget-form input[name="name"] { width: 140px; }
+    .budget-form button {
+      padding: 0.35rem 0.65rem; border-radius: 6px;
+      border: 1px solid var(--accent); background: var(--accent);
+      color: #fff; cursor: pointer; font-size: 0.8rem;
+    }
+    .budget-form button:hover { background: var(--accent-dim); }
+
+    /* -- Toggle switch -- */
+    .toggle { display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-size: 0.78rem; }
+    .toggle-track {
+      width: 34px; height: 18px; border-radius: 99px; position: relative;
+      background: var(--border); transition: background 0.2s; flex-shrink: 0;
+    }
+    .toggle-track.on { background: var(--green); }
+    .toggle-track.red.on { background: var(--red); }
+    .toggle-track .toggle-thumb {
+      position: absolute; top: 2px; left: 2px;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--text); transition: left 0.2s;
+    }
+    .toggle-track.on .toggle-thumb { left: 18px; }
+    .toggle-label { color: var(--muted); user-select: none; }
+    .toggle-label.on { color: var(--text); font-weight: 500; }
+
+    /* -- Hourly chart -- */
+    .hourly-chart { display: flex; align-items: flex-end; gap: 2px; height: 60px; margin-top: 0.5rem; }
+    .hourly-bar {
+      flex: 1; background: var(--accent); border-radius: 2px 2px 0 0;
+      min-width: 4px; position: relative;
+    }
+    .hourly-bar:hover::after {
+      content: attr(data-label);
+      position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+      background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.2rem 0.4rem; font-size: 0.65rem; white-space: nowrap; z-index: 5;
+    }
+
+    /* -- Builder box -- */
+    .builder-box {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1rem; margin-bottom: 1rem;
+    }
+    .builder-box h3 {
+      font-size: 0.9rem; font-weight: 600; margin-bottom: 0.6rem;
+    }
+    .builder-box textarea {
+      width: 100%; min-height: 80px; padding: 0.6rem 0.75rem;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 0.85rem;
+      font-family: inherit; resize: vertical; line-height: 1.5;
+    }
+    .builder-box textarea:focus { outline: none; border-color: var(--accent); }
+    .builder-box textarea::placeholder { color: var(--muted); }
+    .builder-actions {
+      display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center;
+    }
+    .btn-primary {
+      padding: 0.45rem 1rem; border-radius: 8px; border: none;
+      background: var(--accent); color: #fff; font-size: 0.85rem;
+      cursor: pointer; font-weight: 500;
+    }
+    .btn-primary:hover { background: var(--accent-dim); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-secondary {
+      padding: 0.4rem 0.8rem; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--surface2);
+      color: var(--text); font-size: 0.8rem; cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--border); }
+    .btn-danger {
+      padding: 0.35rem 0.6rem; border-radius: 6px;
+      border: 1px solid var(--red); background: transparent;
+      color: var(--red); font-size: 0.75rem; cursor: pointer;
+    }
+    .btn-danger:hover { background: rgba(250,82,82,0.15); }
+    .builder-status {
+      font-size: 0.8rem; color: var(--muted); margin-left: 0.5rem;
+    }
+    .builder-status.error { color: var(--red); }
+    .builder-status.success { color: var(--green); }
+
+    /* -- Card actions -- */
+    .card-actions {
+      display: flex; gap: 0.35rem; margin-top: 0.6rem;
+      padding-top: 0.5rem; border-top: 1px solid var(--border);
+    }
+
+    /* -- Permissions grid -- */
+    .perm-grid {
+      display: grid; gap: 0.5rem;
+      grid-template-columns: 1fr;
+    }
+    @media (min-width: 480px) {
+      .perm-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .perm-item {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.65rem 0.8rem;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .perm-item .perm-label { font-size: 0.82rem; flex: 1; }
+    .perm-status { font-size: 0.78rem; font-weight: 500; }
+
+    /* -- Demo banner -- */
+    .demo-banner {
+      background: rgba(77,171,247,0.1); border: 1px solid rgba(77,171,247,0.3);
+      border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 1rem;
+      font-size: 0.82rem; color: var(--accent);
+    }
+    .demo-banner code {
+      background: var(--surface2); padding: 0.1rem 0.35rem; border-radius: 4px;
+      font-size: 0.78rem;
+    }
+
+    /* -- Modal overlay -- */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+      justify-content: center; align-items: flex-start;
+      padding: 2rem 1rem; overflow-y: auto;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; width: 100%; max-width: 600px;
+      padding: 1.25rem 1.5rem; position: relative;
+    }
+    .modal-title {
+      font-size: 1rem; font-weight: 600; margin-bottom: 1rem;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .modal-close {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      font-size: 1.2rem; padding: 0.2rem 0.4rem; border-radius: 4px;
+    }
+    .modal-close:hover { background: var(--surface2); color: var(--text); }
+
+    /* -- Form fields -- */
+    .form-group { margin-bottom: 0.75rem; }
+    .form-label {
+      display: block; font-size: 0.78rem; color: var(--muted);
+      margin-bottom: 0.25rem; font-weight: 500;
+    }
+    .form-input, .form-select, .form-textarea {
+      width: 100%; padding: 0.45rem 0.6rem; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg);
+      color: var(--text); font-size: 0.85rem; font-family: inherit;
+    }
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .form-textarea { resize: vertical; min-height: 60px; line-height: 1.4; }
+    .form-hint { font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }
+    .form-row {
+      display: flex; gap: 0.5rem;
+    }
+    .form-row .form-group { flex: 1; }
+
+    /* -- Tools editor -- */
+    .tools-editor { margin-top: 0.25rem; }
+    .tool-entry {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.6rem 0.75rem; margin-bottom: 0.5rem;
+    }
+    .tool-entry-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .tool-entry-header input { flex: 1; }
+    .btn-remove-tool {
+      background: none; border: none; color: var(--red); cursor: pointer;
+      font-size: 0.85rem; padding: 0.2rem 0.4rem; border-radius: 4px;
+      margin-left: 0.4rem;
+    }
+    .btn-remove-tool:hover { background: rgba(250,82,82,0.15); }
+    .param-entry {
+      display: flex; gap: 0.35rem; align-items: center;
+      margin-top: 0.3rem; padding-left: 0.5rem;
+    }
+    .param-entry input { flex: 1; min-width: 0; }
+    .param-entry select { width: 90px; }
+    .param-entry label { font-size: 0.75rem; color: var(--muted); white-space: nowrap; display: flex; align-items: center; gap: 0.2rem; }
+    .param-entry label input[type="checkbox"] { margin: 0; }
+    .btn-add-param {
+      background: none; border: none; color: var(--accent); cursor: pointer;
+      font-size: 0.75rem; padding: 0.2rem 0; margin-top: 0.2rem;
+    }
+    .btn-add-param:hover { text-decoration: underline; }
+    .btn-add-tool {
+      padding: 0.35rem 0.65rem; border-radius: 6px;
+      border: 1px dashed var(--border); background: transparent;
+      color: var(--muted); font-size: 0.8rem; cursor: pointer;
+      width: 100%; margin-top: 0.25rem;
+    }
+    .btn-add-tool:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* -- Scope editor -- */
+    .scopes-editor { margin-top: 0.25rem; }
+    .scope-entry {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.6rem 0.75rem; margin-bottom: 0.5rem;
+    }
+    .scope-entry-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .scope-entry-header input { flex: 1; }
+    .scope-rule-entry {
+      display: flex; gap: 0.35rem; align-items: center;
+      margin-top: 0.3rem; padding-left: 0.5rem;
+    }
+    .scope-rule-entry input { flex: 1; min-width: 0; }
+    .scope-rule-entry select { width: 90px; }
+    .scope-max-calls {
+      display: flex; gap: 0.35rem; align-items: center;
+      margin-top: 0.4rem; padding-left: 0.5rem; font-size: 0.78rem;
+    }
+    .scope-max-calls label { color: var(--muted); white-space: nowrap; }
+    .scope-max-calls input { width: 80px; }
+    .btn-add-scope {
+      padding: 0.35rem 0.65rem; border-radius: 6px;
+      border: 1px dashed var(--border); background: transparent;
+      color: var(--muted); font-size: 0.8rem; cursor: pointer;
+      width: 100%; margin-top: 0.25rem;
+    }
+    .btn-add-scope:hover { border-color: var(--orange); color: var(--orange); }
+    .btn-add-rule {
+      background: none; border: none; color: var(--accent); cursor: pointer;
+      font-size: 0.75rem; padding: 0.2rem 0; margin-top: 0.2rem;
+    }
+    .btn-add-rule:hover { text-decoration: underline; }
+
+    /* -- Modal footer -- */
+    .modal-footer {
+      display: flex; gap: 0.5rem; justify-content: flex-end;
+      margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border);
+    }
+
+    /* -- Confirm dialog -- */
+    .confirm-dialog {
+      text-align: center; padding: 1rem;
+    }
+    .confirm-dialog p {
+      font-size: 0.9rem; margin-bottom: 1rem; line-height: 1.5;
+    }
+    .confirm-dialog .highlight {
+      color: var(--accent); font-weight: 600;
+    }
+    .confirm-actions {
+      display: flex; gap: 0.5rem; justify-content: center;
+    }
+
+    /* -- Skill assignment checklist -- */
+    .skill-checklist { display: flex; flex-direction: column; gap: 0.4rem; }
+    .skill-check-item {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.4rem 0.6rem; border-radius: 6px;
+      background: var(--surface2); border: 1px solid var(--border);
+      font-size: 0.82rem; cursor: pointer;
+    }
+    .skill-check-item:hover { border-color: var(--accent); }
+    .skill-check-item input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
+    .skill-check-item .skill-check-name { font-weight: 500; }
+    .skill-check-item .skill-check-desc { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
+    .no-skills-msg { font-size: 0.82rem; color: var(--muted); padding: 0.5rem 0; }
+
+    /* -- Policy assignment checklist -- */
+    .policy-checklist { display: flex; flex-direction: column; gap: 0.4rem; }
+    .policy-check-item {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.4rem 0.6rem; border-radius: 6px;
+      background: var(--surface2); border: 1px solid var(--border);
+      font-size: 0.82rem; cursor: pointer;
+    }
+    .policy-check-item:hover { border-color: var(--orange); }
+    .policy-check-item input[type="checkbox"] { margin: 0; accent-color: var(--orange); }
+    .policy-check-item .policy-check-name { font-weight: 500; color: var(--orange); }
+    .policy-check-item .policy-check-desc { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
+    .no-policies-msg { font-size: 0.82rem; color: var(--muted); padding: 0.5rem 0; }
+
+    /* -- Effective policy preview -- */
+    .effective-policy-preview {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.5rem 0.65rem; margin-top: 0.5rem;
+    }
+    .effective-policy-preview .ep-label {
+      font-size: 0.7rem; color: var(--orange); font-weight: 600;
+      margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .effective-policy-preview .detail-row { font-size: 0.78rem; }
+
+    /* -- Policy field toggle row -- */
+    .policy-field-row {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.4rem 0; border-bottom: 1px solid var(--border);
+    }
+    .policy-field-row:last-child { border-bottom: none; }
+    .policy-field-row input[type="checkbox"] { margin: 0; accent-color: var(--orange); flex-shrink: 0; }
+    .policy-field-row .pf-label { font-size: 0.82rem; min-width: 140px; color: var(--muted); }
+    .policy-field-row .pf-input { flex: 1; }
+    .policy-field-row .form-input,
+    .policy-field-row .form-select { font-size: 0.82rem; padding: 0.3rem 0.5rem; }
+    .policy-field-row .form-input:disabled,
+    .policy-field-row .form-select:disabled { opacity: 0.4; }
+
+    /* -- Status control buttons -- */
+    .status-ctrl-btn {
+      width: 26px; height: 26px; border: none; border-radius: 4px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      font-size: 0.85rem; display: inline-flex; align-items: center;
+      justify-content: center; transition: background 0.15s, color 0.15s;
+      padding: 0; line-height: 1;
+    }
+    .status-ctrl-btn:hover { background: var(--surface2); color: var(--text); }
+    .status-ctrl-btn.btn-pause:hover { color: var(--yellow); }
+    .status-ctrl-btn.btn-stop:hover { color: var(--red); }
+    .status-ctrl-btn.btn-play:hover { color: var(--green); }
+
+    /* -- Status badge on card -- */
+    .badge-status-running { background: rgba(81,207,102,0.2); color: var(--green); }
+    .badge-status-paused { background: rgba(252,196,25,0.2); color: var(--yellow); }
+    .badge-status-stopped { background: var(--surface2); color: var(--muted); }
+
+    /* -- Chat panel -- */
+    .chat-panel {
+      position: fixed; right: 0; top: 0; height: 100vh; width: 400px;
+      background: var(--surface); border-left: 1px solid var(--border);
+      z-index: 50; display: flex; flex-direction: column;
+      transform: translateX(100%); transition: transform 0.25s ease;
+    }
+    .chat-panel.open { transform: translateX(0); }
+    @media (max-width: 500px) {
+      .chat-panel { width: 100vw; }
+    }
+    .chat-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .chat-panel-header-left {
+      display: flex; align-items: center; gap: 0.5rem;
+      font-weight: 600; font-size: 0.95rem;
+    }
+    .chat-panel-close {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      font-size: 1.2rem; padding: 0.2rem 0.4rem; border-radius: 4px;
+    }
+    .chat-panel-close:hover { background: var(--surface2); color: var(--text); }
+
+    .chat-panel-banner {
+      padding: 0.6rem 1rem; font-size: 0.82rem;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.5rem; flex-shrink: 0;
+    }
+    .chat-panel-banner.paused-banner {
+      background: rgba(252,196,25,0.1); border-bottom: 1px solid rgba(252,196,25,0.3);
+      color: var(--yellow);
+    }
+    .chat-panel-banner.stopped-banner {
+      background: rgba(134,142,150,0.1); border-bottom: 1px solid rgba(134,142,150,0.3);
+      color: var(--muted);
+    }
+    .chat-panel-banner .btn-banner-action {
+      padding: 0.25rem 0.6rem; border-radius: 5px; border: none;
+      font-size: 0.78rem; cursor: pointer; font-weight: 500;
+    }
+    .paused-banner .btn-banner-action {
+      background: var(--yellow); color: #1a1b1e;
+    }
+    .stopped-banner .btn-banner-action {
+      background: var(--muted); color: #1a1b1e;
+    }
+
+    .chat-messages {
+      flex: 1; overflow-y: auto; padding: 0.75rem 1rem;
+      display: flex; flex-direction: column; gap: 0.6rem;
+    }
+    .chat-msg {
+      max-width: 85%; padding: 0.55rem 0.75rem; border-radius: 10px;
+      font-size: 0.84rem; line-height: 1.45; word-wrap: break-word;
+    }
+    .chat-msg.user {
+      align-self: flex-end;
+      background: rgba(77,171,247,0.2); color: var(--text);
+      border-bottom-right-radius: 3px;
+    }
+    .chat-msg.agent {
+      align-self: flex-start;
+      background: var(--surface2); color: var(--text);
+      border-bottom-left-radius: 3px;
+    }
+    .chat-msg .msg-role {
+      font-size: 0.68rem; color: var(--muted); margin-bottom: 0.2rem;
+      font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+    }
+    .chat-tool-call {
+      display: inline-block; margin: 0.25rem 0; padding: 0.3rem 0.55rem;
+      border-radius: 6px; font-size: 0.76rem; font-family: 'SF Mono', 'Consolas', monospace;
+      background: rgba(255,146,43,0.12); border: 1px solid rgba(255,146,43,0.3);
+      color: var(--orange);
+    }
+    .chat-tool-call .tool-call-name {
+      font-weight: 600;
+    }
+    .chat-tool-call .tool-call-params {
+      color: var(--muted); font-size: 0.72rem;
+    }
+
+    .chat-input-area {
+      display: flex; gap: 0.4rem; padding: 0.65rem 1rem;
+      border-top: 1px solid var(--border); flex-shrink: 0;
+    }
+    .chat-input-area input {
+      flex: 1; padding: 0.45rem 0.6rem; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--bg);
+      color: var(--text); font-size: 0.85rem; font-family: inherit;
+    }
+    .chat-input-area input:focus { outline: none; border-color: var(--accent); }
+    .chat-input-area button {
+      padding: 0.45rem 0.8rem; border-radius: 8px; border: none;
+      background: var(--accent); color: #fff; font-size: 0.85rem;
+      cursor: pointer; font-weight: 500;
+    }
+    .chat-input-area button:hover { background: var(--accent-dim); }
+  </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <h1>AgentHandler</h1>
+  <div class="actions">
+    <button type="button" id="btn-reload">Reload Demo</button>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs" role="tablist">
+  <button class="tab active" data-tab="overview" role="tab">Overview</button>
+  <button class="tab" data-tab="agents" role="tab">Agents</button>
+  <button class="tab" data-tab="skills" role="tab">Skills</button>
+  <button class="tab" data-tab="costs" role="tab">Costs</button>
+  <button class="tab" data-tab="policies" role="tab">Policies</button>
+  <button class="tab" data-tab="routing" role="tab">Routing</button>
+  <button class="tab" data-tab="sessions" role="tab">Sessions</button>
+</div>
+
+<!-- Content -->
+<div class="content">
+
+  <!-- Overview -->
+  <div class="section active" id="sec-overview">
+    <div class="demo-banner">
+      Interactive demo &mdash; this dashboard shows what AgentHandler supervision looks like.
+      Connect it to a live agent with <code>pip install agenthandler</code>.
+    </div>
+    <div class="sys-grid" id="sys-grid"></div>
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:1rem 0 0.5rem;">Agents</h3>
+    <div class="card-grid" id="overview-agents"></div>
+  </div>
+
+  <!-- Agents -->
+  <div class="section" id="sec-agents">
+    <div class="builder-box">
+      <h3 style="display:flex; align-items:center; justify-content:space-between;">
+        Create an Agent
+        <span>
+          <button class="btn-secondary" onclick="openAgentModal()">+ Manual</button>
+          <button class="btn-secondary" onclick="document.getElementById('create-session-form').style.display=document.getElementById('create-session-form').style.display==='none'?'block':'none'">+ New Agent</button>
+        </span>
+      </h3>
+      <textarea id="agent-builder-input" placeholder="Describe what you want the agent to do in plain English...&#10;&#10;Example: An agent that researches topics on the web, limited to 5 searches, with a 30 second timeout, and asks before deleting anything"></textarea>
+      <div class="builder-actions">
+        <button class="btn-primary" id="btn-create-agent-nl">Create from Description</button>
+        <span class="builder-status" id="agent-builder-status"></span>
+      </div>
+    </div>
+
+    <!-- Full agent creation form (with triggers, pipeline, policy) -->
+    <div class="card" id="create-session-form" style="margin-bottom:0.75rem; display:none;">
+      <div class="card-header"><span class="card-title">New Agent</span>
+        <button class="btn-secondary" onclick="document.getElementById('create-session-form').style.display='none'" style="font-size:0.75rem;">&times; Close</button>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem; margin-top:0.5rem;">
+        <div>
+          <label style="font-size:0.75rem; color:var(--muted);">Agent ID</label>
+          <input class="form-input" id="new-session-agent-id" placeholder="e.g. researcher" style="font-size:0.82rem;">
+        </div>
+        <div>
+          <label style="font-size:0.75rem; color:var(--muted);">Max Iterations</label>
+          <input class="form-input" id="new-session-max-iter" type="number" value="10" style="font-size:0.82rem;">
+        </div>
+        <div>
+          <label style="font-size:0.75rem; color:var(--muted);">Tool Timeout (s)</label>
+          <input class="form-input" id="new-session-timeout" type="number" value="30" style="font-size:0.82rem;">
+        </div>
+        <div>
+          <label style="font-size:0.75rem; color:var(--muted);">Token Budget</label>
+          <input class="form-input" id="new-session-budget" type="number" placeholder="unlimited" style="font-size:0.82rem;">
+        </div>
+      </div>
+      <!-- Assign policies -->
+      <div style="margin-top:0.5rem;">
+        <label style="font-size:0.78rem; color:var(--muted); display:block; margin-bottom:0.3rem;">Assign policies</label>
+        <div id="new-session-policies" style="display:flex; flex-wrap:wrap; gap:0.4rem;"></div>
+      </div>
+
+      <div style="margin-top:0.5rem; display:flex; align-items:center; gap:1rem;">
+        <label style="font-size:0.82rem; display:flex; align-items:center; gap:0.3rem; cursor:pointer;">
+          <input type="checkbox" id="new-session-stateless"> Make this agent stateless
+        </label>
+        <span style="font-size:0.72rem; color:var(--muted);">No checkpoints, no crash recovery &mdash; in-memory only</span>
+      </div>
+
+      <!-- When to run -->
+      <div style="margin-top:0.75rem; border-top:1px solid var(--border); padding-top:0.75rem;">
+        <label style="font-size:0.85rem; font-weight:600; margin-bottom:0.4rem; display:block;">When to run</label>
+        <div style="display:flex; gap:0.4rem; margin-bottom:0.4rem;">
+          <button class="btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.6rem;" onclick="setTriggerMode('ondemand')" id="btn-trigger-ondemand">On-demand</button>
+          <button class="btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.6rem;" onclick="setTriggerMode('interval')" id="btn-trigger-interval">Interval</button>
+          <button class="btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.6rem;" onclick="setTriggerMode('cron')" id="btn-trigger-cron">Cron</button>
+          <button class="btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.6rem;" onclick="setTriggerMode('webhook')" id="btn-trigger-webhook">Webhook</button>
+          <button class="btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.6rem;" onclick="setTriggerMode('dbwatch')" id="btn-trigger-dbwatch">DB Watch</button>
+        </div>
+        <div id="trigger-ondemand-opts" style="display:none; font-size:0.75rem; color:var(--muted);">Run manually via the API or dashboard.</div>
+        <div id="trigger-interval-opts" style="display:none;">
+          <div style="display:flex; gap:0.4rem; align-items:center;">
+            <span style="font-size:0.78rem;">Every</span>
+            <input class="form-input" id="trigger-interval-value" type="number" value="15" min="1" style="width:60px; font-size:0.78rem;">
+            <select class="form-input" id="trigger-interval-unit" style="width:90px; font-size:0.78rem;">
+              <option value="minutes">minutes</option>
+              <option value="hours">hours</option>
+              <option value="seconds">seconds</option>
+            </select>
+          </div>
+        </div>
+        <div id="trigger-cron-opts" style="display:none;">
+          <input class="form-input" id="trigger-cron-expr" placeholder="0 9 * * * (every day at 9am)" style="font-size:0.78rem; width:100%; font-family:monospace;">
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:0.2rem;">Format: minute hour day-of-month month day-of-week</div>
+        </div>
+        <div id="trigger-webhook-opts" style="display:none;">
+          <div style="font-size:0.78rem; color:var(--muted);">A webhook URL will be generated after creation. Fire it with: <code>POST /triggers/{name}/fire</code></div>
+        </div>
+        <div id="trigger-dbwatch-opts" style="display:none;">
+          <div style="margin-bottom:0.3rem;">
+            <label style="font-size:0.72rem; color:var(--muted);">SQL query to watch</label>
+            <input class="form-input" id="trigger-dbwatch-query" placeholder="SELECT count(*) as cnt FROM alerts WHERE seen=false" style="font-size:0.78rem; width:100%; font-family:monospace;">
+          </div>
+          <div style="display:flex; gap:0.4rem; align-items:center;">
+            <span style="font-size:0.78rem;">Fire when result</span>
+            <select class="form-input" id="trigger-dbwatch-op" style="width:50px; font-size:0.78rem;">
+              <option value=">">></option>
+              <option value=">=">>=</option>
+              <option value="<"><</option>
+              <option value="==">==</option>
+              <option value="!=">!=</option>
+            </select>
+            <input class="form-input" id="trigger-dbwatch-threshold" type="number" value="0" style="width:70px; font-size:0.78rem;">
+            <span style="font-size:0.78rem;">poll every</span>
+            <input class="form-input" id="trigger-dbwatch-poll" type="number" value="60" min="5" style="width:60px; font-size:0.78rem;">
+            <span style="font-size:0.78rem;">sec</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pipeline editor -->
+      <div style="margin-top:0.75rem; border-top:1px solid var(--border); padding-top:0.75rem;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
+          <label style="font-size:0.85rem; font-weight:600;">Pipeline <span style="font-size:0.72rem; color:var(--muted); font-weight:400;">(optional)</span></label>
+          <div style="display:flex; gap:0.3rem;">
+            <button class="btn-secondary" style="font-size:0.72rem; padding:0.2rem 0.5rem;" onclick="togglePipelineMode('describe')" id="btn-pipeline-describe">Describe</button>
+            <button class="btn-secondary" style="font-size:0.72rem; padding:0.2rem 0.5rem;" onclick="togglePipelineMode('edit')" id="btn-pipeline-edit">Edit POML</button>
+          </div>
+        </div>
+        <div id="pipeline-describe-mode" style="display:none;">
+          <textarea class="form-input" id="pipeline-description" rows="3" placeholder="Describe what the pipeline should do in plain English..." style="font-size:0.82rem; width:100%; resize:vertical;"></textarea>
+          <div style="display:flex; gap:0.4rem; margin-top:0.3rem;">
+            <button class="btn-secondary" onclick="generatePipelinePoml()" id="btn-generate-poml" style="font-size:0.78rem;">Generate POML</button>
+            <span id="pipeline-generate-status" style="font-size:0.72rem; color:var(--muted); align-self:center;"></span>
+          </div>
+        </div>
+        <div id="pipeline-edit-mode" style="display:none;">
+          <textarea class="form-input" id="pipeline-poml-editor" rows="10" placeholder="&lt;pipeline&gt;&#10;  &lt;step tool=&quot;search&quot;&gt;find information&lt;/step&gt;&#10;  &lt;step tool=&quot;summarize&quot;&gt;summarize findings&lt;/step&gt;&#10;&lt;/pipeline&gt;" style="font-size:0.78rem; width:100%; resize:vertical; font-family:monospace; line-height:1.5;"></textarea>
+          <div style="display:flex; gap:0.4rem; margin-top:0.3rem;">
+            <button class="btn-secondary" onclick="validatePipelinePoml()" style="font-size:0.78rem;">Validate</button>
+            <span id="pipeline-validate-status" style="font-size:0.72rem; color:var(--muted); align-self:center;"></span>
+          </div>
+        </div>
+        <div id="pipeline-tools-list" style="display:none; margin-top:0.4rem;">
+          <div style="font-size:0.72rem; color:var(--muted); margin-bottom:0.2rem;">Available tools:</div>
+          <div id="pipeline-tools-tags" style="display:flex; flex-wrap:wrap; gap:0.2rem;"></div>
+        </div>
+        <div id="pipeline-schema" style="display:none; margin-top:0.4rem;">
+          <div class="collapsible-header" onclick="toggleCollapsible(this)" style="font-size:0.72rem; color:var(--muted);"><span class="arrow">&#9654;</span> Database schema</div>
+          <div class="collapsible-body">
+            <pre id="pipeline-schema-content" style="font-size:0.7rem; color:var(--muted); background:var(--bg); padding:0.4rem; border-radius:4px; max-height:200px; overflow-y:auto; margin:0;"></pre>
+          </div>
+        </div>
+        <div id="pipeline-preview" style="display:none; margin-top:0.4rem;">
+          <div style="font-size:0.72rem; color:var(--muted); margin-bottom:0.2rem;">Pipeline steps:</div>
+          <div id="pipeline-preview-steps"></div>
+        </div>
+      </div>
+
+      <div class="card-actions" style="margin-top:0.5rem;">
+        <button class="btn-secondary" onclick="submitCreateSession()" style="background:var(--accent); color:#fff; border-color:var(--accent);">Create Agent</button>
+        <button class="btn-secondary" onclick="runPipelineNow()" style="font-size:0.78rem;" id="btn-run-pipeline" title="Create agent and run the pipeline immediately">Run Pipeline</button>
+      </div>
+    </div>
+
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:0 0 0.5rem;">Your Agents</h3>
+    <div class="card-grid" id="agents-grid"></div>
+  </div>
+
+  <!-- Skills -->
+  <div class="section" id="sec-skills">
+    <div class="builder-box">
+      <h3 style="display:flex; align-items:center; justify-content:space-between;">
+        Create a Skill
+        <button class="btn-secondary" onclick="openSkillModal()">+ New Skill (Manual)</button>
+      </h3>
+      <textarea id="skill-builder-input" placeholder="Describe the skill (capability) in plain English...&#10;&#10;Example: A web search skill with a search tool and a page fetcher tool"></textarea>
+      <div class="builder-actions">
+        <button class="btn-primary" id="btn-create-skill-nl">Create from Description</button>
+        <span class="builder-status" id="skill-builder-status"></span>
+      </div>
+    </div>
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:0 0 0.5rem;">Your Skills</h3>
+    <div class="card-grid" id="skills-grid"></div>
+  </div>
+
+  <!-- Costs -->
+  <div class="section" id="sec-costs">
+    <div class="sys-grid" id="cost-totals"></div>
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:1rem 0 0.5rem;">Budgets</h3>
+    <div id="budgets-list"></div>
+    <div class="budget-form" id="budget-form">
+      <input type="text" name="name" placeholder="global or agent name">
+      <input type="number" name="dollars" placeholder="$ limit" step="0.01" min="0">
+      <select name="period">
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="monthly" selected>Monthly</option>
+        <option value="total">Total</option>
+      </select>
+      <label class="toggle" id="hard-stop-toggle">
+        <div class="toggle-track red" id="hard-stop-track"><div class="toggle-thumb"></div></div>
+        <span class="toggle-label" id="hard-stop-label">Hard stop</span>
+      </label>
+      <button type="button" id="btn-set-budget">Set Budget</button>
+    </div>
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:1rem 0 0.5rem;">Cost by Agent</h3>
+    <div id="cost-by-agent"></div>
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:1rem 0 0.5rem;">Last 24 Hours</h3>
+    <div id="cost-hourly"></div>
+  </div>
+
+  <!-- Policies -->
+  <div class="section" id="sec-policies">
+    <div class="builder-box">
+      <h3 style="display:flex; align-items:center; justify-content:space-between;">
+        Policies
+        <button class="btn-secondary" onclick="openPolicyModal()">+ New Policy</button>
+      </h3>
+      <p style="font-size:0.82rem; color:var(--muted); line-height:1.4;">
+        Policies are granular supervision rules. Each policy controls specific aspects of agent behavior.
+        Assign multiple policies to an agent &mdash; they merge in order (later policies override earlier ones for overlapping fields).
+      </p>
+    </div>
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:0 0 0.5rem;">Your Policies</h3>
+    <div class="card-grid" id="policy-grid"></div>
+  </div>
+
+  <!-- Routing (edge-reduce config) -->
+  <div class="section" id="sec-routing">
+    <div class="builder-box">
+      <h3 style="display:flex; align-items:center; justify-content:space-between;">
+        LLM Routing Policy
+        <span>
+          <button class="btn-secondary" onclick="addRoutingRule()">+ Add Rule</button>
+          <button class="btn-secondary" onclick="exportRoutingYaml()">Export YAML</button>
+          <button class="btn-secondary" onclick="testRoutingQuery()">Test Query</button>
+        </span>
+      </h3>
+      <p style="font-size:0.82rem; color:var(--muted); line-height:1.4;">
+        Configure how LLM queries are routed between local and cloud models.
+        Rules are evaluated top-down (first match wins). Drag to reorder.
+        Export as <code>routing_policy.yaml</code> for use with <code>EdgeReduceLLM</code>.
+      </p>
+    </div>
+
+    <!-- Global settings -->
+    <div class="card" style="margin-bottom:1rem;">
+      <h4 style="font-size:0.85rem; margin-bottom:0.5rem;">Global Settings</h4>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.75rem;">
+        <label style="font-size:0.78rem;">
+          Cloud Model
+          <input class="form-input" id="rt-cloud-model" value="claude-sonnet-4-20250514" style="width:100%; margin-top:0.25rem;">
+        </label>
+        <label style="font-size:0.78rem;">
+          Local Model
+          <input class="form-input" id="rt-local-model" value="qwen3:14b" placeholder="e.g. llama3.2, qwen3:14b" style="width:100%; margin-top:0.25rem;">
+        </label>
+        <label style="font-size:0.78rem;">
+          Local URL
+          <input class="form-input" id="rt-local-url" value="http://localhost:11434/v1" style="width:100%; margin-top:0.25rem;">
+        </label>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.75rem; margin-top:0.75rem;">
+        <label style="font-size:0.78rem;">
+          Escalation Threshold (1-10)
+          <input class="form-input" id="rt-esc-threshold" type="number" min="1" max="10" value="6" style="width:100%; margin-top:0.25rem;">
+        </label>
+        <label style="font-size:0.78rem;">
+          Max Escalations / Hour
+          <input class="form-input" id="rt-esc-max" type="number" min="1" value="30" style="width:100%; margin-top:0.25rem;">
+        </label>
+        <label style="font-size:0.78rem;">
+          Max Cloud Tokens
+          <input class="form-input" id="rt-max-tokens" type="number" min="1000" value="30000" style="width:100%; margin-top:0.25rem;">
+        </label>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.75rem; margin-top:0.75rem;">
+        <label style="font-size:0.78rem;">
+          Compression (Headroom)
+          <select class="form-input" id="rt-compression" style="width:100%; margin-top:0.25rem;">
+            <option value="off">Off</option>
+            <option value="auto" selected>Auto (large outputs)</option>
+            <option value="always">Always</option>
+          </select>
+        </label>
+        <label style="font-size:0.78rem;">
+          Min Tokens to Compress
+          <input class="form-input" id="rt-min-compress" type="number" min="10" value="100" style="width:100%; margin-top:0.25rem;">
+        </label>
+        <label style="font-size:0.78rem;">
+          Est. Savings
+          <div id="rt-savings-est" style="margin-top:0.25rem; padding:0.35rem 0.5rem; background:var(--bg); border-radius:4px; font-size:0.82rem; color:var(--green);">
+            ~60-95% on JSON, ~15-20% on code
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <!-- Rules list -->
+    <h3 style="font-size:0.85rem; color:var(--muted); margin:0 0 0.5rem;">Routing Rules <span style="font-size:0.75rem;">(first match wins)</span></h3>
+    <div id="routing-rules-list"></div>
+
+    <!-- Test panel -->
+    <div id="routing-test-panel" style="display:none; margin-top:1rem;">
+      <div class="card">
+        <h4 style="font-size:0.85rem; margin-bottom:0.5rem;">Test a Query</h4>
+        <div style="display:flex; gap:0.5rem;">
+          <input class="form-input" id="rt-test-input" placeholder="Type a query to test routing..." style="flex:1;">
+          <button class="btn-primary" onclick="runRoutingTest()">Route</button>
+        </div>
+        <div id="rt-test-result" style="margin-top:0.5rem; font-size:0.82rem;"></div>
+      </div>
+    </div>
+
+    <!-- YAML preview -->
+    <div id="routing-yaml-panel" style="display:none; margin-top:1rem;">
+      <div class="card">
+        <h4 style="font-size:0.85rem; margin-bottom:0.5rem;">routing_policy.yaml</h4>
+        <pre id="rt-yaml-output" style="background:var(--bg); padding:0.75rem; border-radius:6px; font-size:0.78rem; overflow-x:auto; max-height:400px; overflow-y:auto;"></pre>
+        <button class="btn-secondary" style="margin-top:0.5rem;" onclick="copyRoutingYaml()">Copy to Clipboard</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sessions (live from REST API) -->
+  <div class="section" id="sec-sessions">
+    <div class="builder-box">
+      <h3 style="display:flex; align-items:center; justify-content:space-between;">
+        Live Sessions
+        <span>
+          <input class="form-input" id="sessions-api-url" placeholder="http://localhost:8000" value="http://localhost:8000" style="width:180px; display:inline-block; font-size:0.78rem; margin-right:0.4rem;">
+          <input class="form-input" id="sessions-api-key" placeholder="API key (optional)" value="" style="width:150px; display:inline-block; font-size:0.78rem; margin-right:0.4rem;" type="password">
+          <button class="btn-secondary" onclick="fetchSessions()">Refresh</button>
+        </span>
+      </h3>
+      <p style="font-size:0.82rem; color:var(--muted); line-height:1.4;">
+        Live agent sessions from the AgentHandler control plane. Start the server with
+        <code>uvicorn agenthandler.server:app</code> then refresh.
+        If you set <code>AGENTHANDLER_API_KEY</code>, enter the same key above.
+      </p>
+    </div>
+    <div id="sessions-status" style="font-size:0.82rem; color:var(--muted); margin-bottom:0.5rem;"></div>
+    <div class="card-grid" id="sessions-grid"></div>
+    <!-- Session detail panel -->
+    <div id="session-detail" style="display:none; margin-top:1rem;">
+      <div class="card" id="session-detail-card"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Agent form modal -->
+<div class="modal-overlay" id="agent-modal">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="agent-modal-title">New Agent</span>
+      <button class="modal-close" onclick="closeAgentModal()">&times;</button>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Name</label>
+      <input class="form-input" id="agent-name" placeholder="e.g. web-researcher">
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Description</label>
+      <textarea class="form-textarea" id="agent-desc" rows="2" placeholder="What does this agent do?"></textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">System Prompt</label>
+      <textarea class="form-textarea" id="agent-system-prompt" rows="6" placeholder="You are a research assistant. You search the web for information, verify facts from multiple sources, and produce concise summaries with citations."></textarea>
+      <div style="display:flex; gap:0.4rem; align-items:center; margin-top:0.3rem;">
+        <button class="btn-secondary" id="btn-generate-prompt" onclick="generateSystemPrompt()" style="white-space:nowrap; font-size:0.72rem; background:var(--accent); color:#000; border-color:var(--accent);">Generate Prompt</button>
+        <input class="form-input" id="agent-refine-input" placeholder="feedback: make it more concise, add error handling..." style="flex:1; font-size:0.78rem;">
+        <button class="btn-secondary" id="btn-refine-prompt" onclick="refineSystemPrompt()" style="white-space:nowrap; font-size:0.72rem;">Refine</button>
+      </div>
+      <div class="form-hint" id="refine-status">Write a rough description above, then hit Generate to have Claude write a proper system prompt.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Task <span style="font-size:0.72rem; color:var(--muted); font-weight:400;">(optional — for scheduled/triggered runs)</span></label>
+      <textarea class="form-textarea" id="agent-task" rows="2" placeholder="e.g. Scrape the front page of CNN and summarize the top 5 stories"></textarea>
+      <div class="form-hint">The default task this agent runs when deployed. Leave blank for chat-based agents.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Triggers <span style="font-size:0.72rem; color:var(--muted); font-weight:400;">(optional)</span></label>
+      <input class="form-input" id="agent-triggers" placeholder="Comma-separated, e.g. research, look up, find out">
+      <div class="form-hint">Keywords that route messages to this agent when using multi-agent setups</div>
+    </div>
+
+    <!-- Assigned Skills -->
+    <div class="form-group">
+      <label class="form-label">Assigned Skills</label>
+      <div class="skill-checklist" id="agent-skill-checklist"></div>
+      <div class="form-hint" style="margin-top:0.35rem;">Select which skills this agent can use</div>
+    </div>
+
+    <!-- Allow unassigned skills -->
+    <div class="form-group">
+      <label class="toggle" id="allow-unassigned-toggle" style="margin-top:0.25rem;">
+        <div class="toggle-track" id="allow-unassigned-track"><div class="toggle-thumb"></div></div>
+        <span class="toggle-label" id="allow-unassigned-label">Allow unassigned skills</span>
+      </label>
+      <div class="form-hint">When enabled, this agent can use any skill, not just the ones assigned above</div>
+    </div>
+
+    <!-- Assigned Policies -->
+    <div class="form-group">
+      <label class="form-label">Assigned Policies</label>
+      <div class="policy-checklist" id="agent-policy-checklist"></div>
+      <div class="form-hint" style="margin-top:0.35rem;">Select policies to apply. Order matters: later policies override earlier ones for overlapping fields.</div>
+    </div>
+
+    <!-- Effective policy preview -->
+    <div class="form-group">
+      <div class="effective-policy-preview" id="agent-effective-policy-preview">
+        <div class="ep-label">Effective Policy (merged preview)</div>
+        <div id="agent-effective-policy-content"></div>
+      </div>
+    </div>
+
+    <!-- Direct budget overrides -->
+    <div class="form-group">
+      <label class="form-label">Budget Overrides <span style="font-size:0.72rem; color:var(--muted); font-weight:400;">(override policy defaults)</span></label>
+      <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:center;">
+        <div style="display:flex; align-items:center; gap:0.3rem;">
+          <span style="font-size:0.78rem; color:var(--muted);">Token budget</span>
+          <input class="form-input" id="agent-token-budget" type="number" placeholder="from policy" min="0" style="width:110px; font-size:0.78rem;">
+        </div>
+        <div style="display:flex; align-items:center; gap:0.3rem;">
+          <span style="font-size:0.78rem; color:var(--muted);">Max spend</span>
+          <span style="font-size:0.78rem; color:var(--muted);">$</span>
+          <input class="form-input" id="agent-dollar-budget" type="number" placeholder="no limit" min="0" step="0.01" style="width:90px; font-size:0.78rem;">
+        </div>
+        <div style="display:flex; align-items:center; gap:0.3rem;">
+          <span style="font-size:0.78rem; color:var(--muted);">Max iterations</span>
+          <input class="form-input" id="agent-max-iterations" type="number" placeholder="from policy" min="1" style="width:80px; font-size:0.78rem;">
+        </div>
+        <div style="display:flex; align-items:center; gap:0.3rem;">
+          <span style="font-size:0.78rem; color:var(--muted);">Tool timeout</span>
+          <input class="form-input" id="agent-tool-timeout" type="number" placeholder="from policy" min="1" style="width:80px; font-size:0.78rem;">
+          <span style="font-size:0.72rem; color:var(--muted);">s</span>
+        </div>
+      </div>
+      <div id="agent-budget-estimate" style="font-size:0.72rem; color:var(--cyan); margin-top:0.3rem;"></div>
+      <div class="form-hint">Leave blank to use values from assigned policies. Values here take priority over policies.</div>
+    </div>
+
+    <!-- When to run (triggers) -->
+    <div class="form-group">
+      <label class="form-label">When to run</label>
+      <select class="form-input" id="agent-trigger-mode" style="font-size:0.82rem;">
+        <option value="ondemand">On-demand</option>
+        <option value="interval">Interval</option>
+        <option value="cron">Cron schedule</option>
+        <option value="webhook">Webhook</option>
+      </select>
+      <div id="agent-trigger-interval-opts" style="display:none; margin-top:0.3rem;">
+        <div style="display:flex; gap:0.3rem; align-items:center;">
+          <span style="font-size:0.78rem;">Every</span>
+          <input class="form-input" id="agent-trigger-interval" type="number" value="15" min="1" style="width:60px; font-size:0.78rem;">
+          <span style="font-size:0.78rem;">minutes</span>
+        </div>
+      </div>
+      <div id="agent-trigger-cron-opts" style="display:none; margin-top:0.3rem;">
+        <input class="form-input" id="agent-trigger-cron" placeholder="0 9 * * *" style="font-size:0.78rem; font-family:monospace;">
+      </div>
+    </div>
+
+    <!-- Pipeline POML -->
+    <div class="form-group">
+      <label class="form-label">Pipeline <span style="font-size:0.72rem; color:var(--muted); font-weight:400;">(optional — multi-step workflows)</span></label>
+
+      <!-- NL generation -->
+      <div style="display:flex; gap:0.4rem; align-items:center; margin-bottom:0.5rem;">
+        <input class="form-input" id="pipeline-nl-input" placeholder="e.g. search for news, filter important ones, email a summary" style="flex:1; font-size:0.78rem;">
+        <button class="btn-secondary" id="btn-generate-pipeline" onclick="generatePipeline()" style="white-space:nowrap; font-size:0.72rem; background:var(--accent); color:#000; border-color:var(--accent);">Generate</button>
+      </div>
+      <div class="form-hint" id="pipeline-gen-status" style="margin-bottom:0.5rem;"></div>
+
+      <!-- Visual step editor -->
+      <div id="pipeline-steps-editor" style="display:flex; flex-direction:column; gap:0.4rem;"></div>
+      <button class="btn-secondary" onclick="addPipelineStep()" style="margin-top:0.4rem; font-size:0.72rem;">+ Add Step</button>
+
+      <!-- Toggle raw POML -->
+      <div style="margin-top:0.5rem;">
+        <button class="btn-secondary" onclick="togglePipelineRaw()" style="font-size:0.7rem;" id="btn-toggle-poml">Show POML</button>
+      </div>
+      <textarea class="form-textarea" id="agent-pipeline-poml" rows="5" style="font-family:monospace; font-size:0.75rem; display:none; margin-top:0.3rem;" placeholder="<pipeline>&#10;  <step tool=&quot;search&quot;>...</step>&#10;</pipeline>"></textarea>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeAgentModal()">Cancel</button>
+      <button class="btn-primary" id="btn-save-agent" onclick="saveAgent()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Skill form modal -->
+<div class="modal-overlay" id="skill-modal">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="skill-modal-title">New Skill</span>
+      <button class="modal-close" onclick="closeSkillModal()">&times;</button>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Name</label>
+      <input class="form-input" id="skill-name" placeholder="e.g. web-search">
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Description</label>
+      <textarea class="form-textarea" id="skill-desc" rows="2" placeholder="What capability does this skill provide?"></textarea>
+    </div>
+
+    <!-- Tools -->
+    <div class="form-group">
+      <label class="form-label">Tools</label>
+      <div class="tools-editor" id="skill-tools-editor"></div>
+      <button class="btn-add-tool" onclick="addToolEntry()">+ Add Tool</button>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeSkillModal()">Cancel</button>
+      <button class="btn-primary" id="btn-save-skill" onclick="saveSkill()">Create Skill</button>
+    </div>
+  </div>
+</div>
+
+<!-- Policy form modal -->
+<div class="modal-overlay" id="policy-modal">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="policy-modal-title">New Policy</span>
+      <button class="modal-close" onclick="closePolicyModal()">&times;</button>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Name</label>
+      <input class="form-input" id="policy-name" placeholder="e.g. rate-limiter">
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Description</label>
+      <textarea class="form-textarea" id="policy-desc" rows="2" placeholder="What does this policy control?"></textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Fields (check to include in this policy)</label>
+      <div style="background:var(--surface2); border-radius:8px; padding:0.65rem 0.75rem;">
+        <div class="policy-field-row">
+          <input type="checkbox" id="pf-max-iter-on">
+          <span class="pf-label">Max iterations</span>
+          <div class="pf-input"><input class="form-input" id="pf-max-iter" type="number" value="5" min="1" disabled></div>
+        </div>
+        <div class="policy-field-row">
+          <input type="checkbox" id="pf-timeout-on">
+          <span class="pf-label">Tool timeout (s)</span>
+          <div class="pf-input"><input class="form-input" id="pf-timeout" type="number" value="15" min="1" disabled></div>
+        </div>
+        <div class="policy-field-row">
+          <input type="checkbox" id="pf-token-budget-on">
+          <span class="pf-label">Token budget</span>
+          <div class="pf-input"><input class="form-input" id="pf-token-budget" type="number" value="10000" min="0" disabled></div>
+        </div>
+        <div class="policy-field-row">
+          <input type="checkbox" id="pf-on-timeout-on">
+          <span class="pf-label">On timeout</span>
+          <div class="pf-input">
+            <select class="form-select" id="pf-on-timeout" disabled>
+              <option value="terminate">Terminate</option>
+              <option value="warn">Warn</option>
+              <option value="retry">Retry</option>
+            </select>
+          </div>
+        </div>
+        <div class="policy-field-row">
+          <input type="checkbox" id="pf-on-budget-on">
+          <span class="pf-label">On budget exceeded</span>
+          <div class="pf-input">
+            <select class="form-select" id="pf-on-budget" disabled>
+              <option value="terminate">Terminate</option>
+              <option value="warn">Warn</option>
+            </select>
+          </div>
+        </div>
+        <div class="policy-field-row">
+          <input type="checkbox" id="pf-require-confirm-on">
+          <span class="pf-label">Require confirmation</span>
+          <div class="pf-input"><input class="form-input" id="pf-require-confirm" placeholder="Comma-separated tool names" disabled></div>
+        </div>
+      </div>
+      <div class="form-hint">Only checked fields will be saved to this policy</div>
+    </div>
+
+    <!-- Tool Scopes -->
+    <div class="form-group">
+      <label class="form-label">Tool Scopes</label>
+      <div class="scopes-editor" id="policy-scopes-editor"></div>
+      <button class="btn-add-scope" onclick="addScopeEntry()">+ Add Scope</button>
+      <div class="form-hint">Define argument-level constraints for specific tools</div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closePolicyModal()">Cancel</button>
+      <button class="btn-primary" id="btn-save-policy" onclick="savePolicy()">Create Policy</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="modal-overlay" id="delete-modal">
+  <div class="modal" style="max-width:380px;">
+    <div class="confirm-dialog">
+      <p id="delete-dialog-msg">Delete <span class="highlight" id="delete-target-name"></span>?<br>This cannot be undone.</p>
+      <div class="confirm-actions">
+        <button class="btn-secondary" onclick="closeDeleteModal()">Cancel</button>
+        <button class="btn-danger" style="padding:0.45rem 1rem; font-size:0.85rem;" id="btn-confirm-delete" onclick="confirmDelete()">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Chat Panel -->
+<div class="chat-panel" id="chat-panel">
+  <div class="chat-panel-header">
+    <div class="chat-panel-header-left">
+      <span class="dot" id="chat-panel-status-dot"></span>
+      <span id="chat-panel-agent-name"></span>
+    </div>
+    <button class="chat-panel-close" onclick="closeChatPanel()">&times;</button>
+  </div>
+  <div id="chat-panel-banner-area"></div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-input-area">
+    <input type="text" id="chat-input" placeholder="Send a message..." autocomplete="off">
+    <button id="btn-chat-send" onclick="sendChatMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+// -- Helpers --
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+function sysCard(value, label) {
+  return '<div class="sys-card"><div class="sys-value">' + esc(String(value)) + '</div><div class="sys-label">' + esc(label) + '</div></div>';
+}
+
+// -- Data Model --
+
+// Policies: granular supervision rules
+// Persist agents/skills/policies to localStorage
+function _loadState(key, fallback) {
+  try { var s = localStorage.getItem('agenthandler_' + key); return s ? JSON.parse(s) : fallback; }
+  catch(e) { return fallback; }
+}
+function _saveState(key, data) {
+  try { localStorage.setItem('agenthandler_' + key, JSON.stringify(data)); } catch(e) {}
+}
+
+const _DEFAULT_POLICIES = [
+  {
+    name: 'tight-budget',
+    description: 'Strict token budget with termination on exceed',
+    token_budget: 5000,
+    on_budget_exceeded: 'terminate'
+  },
+  {
+    name: 'rate-limiter',
+    description: 'Limits iteration count and tool timeout',
+    max_iterations: 5,
+    tool_timeout: 15,
+    on_timeout: 'terminate'
+  },
+  {
+    name: 'generous-limits',
+    description: 'Relaxed limits for long-running tasks',
+    max_iterations: 20,
+    tool_timeout: 60,
+    token_budget: 50000,
+    on_timeout: 'warn',
+    on_budget_exceeded: 'warn'
+  },
+  {
+    name: 'confirmation-required',
+    description: 'Requires user confirmation for destructive operations',
+    require_confirm: ['delete_file', 'write_file', 'send_email']
+  },
+  {
+    name: 'sandbox-files',
+    description: 'Restricts file writes and deletes to safe directories only',
+    tool_scopes: [
+      {
+        tool_name: 'write_file',
+        rules: [
+          { param: 'path', constraint: 'allow', values: ['/tmp/*', '/home/user/output/*'] }
+        ]
+      },
+      {
+        tool_name: 'delete_file',
+        rules: [
+          { param: 'path', constraint: 'allow', values: ['/tmp/*', '/home/user/output/*'] }
+        ]
+      }
+    ]
+  },
+  {
+    name: 'safe-outbound',
+    description: 'Restricts outbound email recipients and blocks sensitive search terms',
+    tool_scopes: [
+      {
+        tool_name: 'send_email',
+        rules: [
+          { param: 'recipient', constraint: 'allow', values: ['*@mycompany.com'] }
+        ]
+      },
+      {
+        tool_name: 'web_search',
+        rules: [
+          { param: 'query', constraint: 'block', values: ['internal', 'confidential'] }
+        ]
+      }
+    ]
+  }
+];
+
+let POLICIES = _loadState('policies', _DEFAULT_POLICIES);
+
+// Skills: capabilities with tools
+const _DEFAULT_SKILLS = [
+  {
+    name: 'web-search',
+    description: 'Search the web and fetch pages',
+    tools: [
+      { name: 'web_search', description: 'Search the web', parameters: [{ name: 'query', type: 'string', required: true }] },
+      { name: 'fetch_page', description: 'Fetch and extract page content', parameters: [{ name: 'url', type: 'string', required: true }] }
+    ]
+  },
+  {
+    name: 'file-ops',
+    description: 'Read, write, and delete files on disk',
+    tools: [
+      { name: 'read_file', description: 'Read a file', parameters: [{ name: 'path', type: 'string', required: true }] },
+      { name: 'write_file', description: 'Write content to a file', parameters: [{ name: 'path', type: 'string', required: true }, { name: 'content', type: 'string', required: true }] },
+      { name: 'delete_file', description: 'Delete a file', parameters: [{ name: 'path', type: 'string', required: true }] }
+    ]
+  },
+  {
+    name: 'code-review',
+    description: 'Get PR diffs and post review comments',
+    tools: [
+      { name: 'get_diff', description: 'Get PR diff', parameters: [{ name: 'pr_number', type: 'integer', required: true }] },
+      { name: 'post_comment', description: 'Post a review comment', parameters: [{ name: 'pr_number', type: 'integer', required: true }, { name: 'body', type: 'string', required: true }] }
+    ]
+  }
+];
+
+let SKILLS = _loadState('skills', _DEFAULT_SKILLS);
+
+// Agents: supervised entities that use skills and have policies
+const _DEFAULT_AGENTS = [
+  {
+    name: 'web-researcher',
+    description: 'Searches the web for information, summarises findings, and cites sources.',
+    triggers: ['research', 'look up', 'find out'],
+    assignedSkills: ['web-search'],
+    allowUnassignedSkills: false,
+    status: 'running',
+    assignedPolicies: ['rate-limiter', 'tight-budget']
+  },
+  {
+    name: 'file-manager',
+    description: 'Reads, writes, and organises files on disk.',
+    triggers: ['save file', 'read file', 'organise'],
+    assignedSkills: ['file-ops'],
+    allowUnassignedSkills: false,
+    status: 'running',
+    assignedPolicies: ['generous-limits', 'confirmation-required']
+  },
+  {
+    name: 'code-reviewer',
+    description: 'Reviews pull requests and leaves inline comments with suggestions.',
+    triggers: ['review PR', 'code review'],
+    assignedSkills: ['code-review', 'web-search'],
+    allowUnassignedSkills: true,
+    status: 'paused',
+    assignedPolicies: ['rate-limiter']
+  }
+];
+
+let AGENTS = _loadState('agents', _DEFAULT_AGENTS);
+
+const DEMO_COSTS = {
+  total_cost_usd: 2.3471,
+  total_tokens: 482910,
+  total_calls: 147,
+  budgets: [
+    { name: 'global', limit_usd: 50, spent_usd: 2.3471, remaining_usd: 47.6529, percent_used: 5, period: 'monthly', hard_stop: false },
+    { name: 'web-researcher', limit_usd: 10, spent_usd: 1.2034, remaining_usd: 8.7966, percent_used: 12, period: 'monthly', hard_stop: true }
+  ],
+  by_agent: [
+    { agent: 'web-researcher', calls: 83, tokens: 241200, cost: 1.2034 },
+    { agent: 'file-manager', calls: 41, tokens: 156300, cost: 0.7812 },
+    { agent: 'code-reviewer', calls: 23, tokens: 85410, cost: 0.3625 }
+  ],
+  hourly_24h: Array.from({ length: 24 }, (_, i) => ({
+    hour: '2026-03-20T' + String(i).padStart(2, '0') + ':00:00',
+    cost: Math.random() * 0.3,
+    calls: Math.floor(Math.random() * 15)
+  }))
+};
+
+// -- Chat data model --
+let chatHistory = {
+  'web-researcher': [
+    { role: 'user', content: 'What are the latest developments in quantum computing?' },
+    { role: 'agent', content: null, toolCalls: [{ name: 'web_search', params: 'query="quantum computing latest developments 2026"' }] },
+    { role: 'agent', content: 'Based on my research, here are the key developments in quantum computing for 2026:\n\n1. Google achieved quantum supremacy on a 1500-qubit processor\n2. Error correction rates improved by 10x over last year\n3. New hybrid classical-quantum algorithms are showing practical advantages in drug discovery' },
+    { role: 'user', content: "Can you find more about IBM's new processor?" },
+    { role: 'agent', content: null, toolCalls: [{ name: 'web_search', params: 'query="IBM quantum processor 2026"' }] },
+    { role: 'agent', content: null, toolCalls: [{ name: 'fetch_page', params: 'url="https://research.ibm.com/quantum"' }] },
+    { role: 'agent', content: "IBM announced their new 1000+ qubit processor, codenamed \"Condor II\". Key highlights:\n\n- 1,121 superconducting qubits with improved coherence times\n- 99.9% two-qubit gate fidelity\n- Integrated classical-quantum middleware for hybrid workloads\n- Expected to be available via IBM Quantum Network in Q3 2026" }
+  ]
+};
+
+let chatOpenAgent = null;
+
+// -- Simulated agent response templates --
+const agentResponseTemplates = [
+  {
+    toolCalls: [{ name: 'web_search', params: 'query="<topic>"' }],
+    content: 'I found several relevant results. Let me summarize the key findings for you.'
+  },
+  {
+    toolCalls: [{ name: 'fetch_page', params: 'url="https://example.com/result"' }],
+    content: 'After reviewing the page, here is what I found relevant to your question.'
+  },
+  {
+    toolCalls: [{ name: 'read_file', params: 'path="./data/results.json"' }],
+    content: 'I read the file and extracted the relevant information for you.'
+  },
+  {
+    toolCalls: [{ name: 'get_diff', params: 'pr_number=42' }],
+    content: 'I reviewed the diff and here are my observations on the code changes.'
+  },
+  {
+    toolCalls: [],
+    content: 'That is an interesting question. Based on what I know, I can provide some insights on this topic.'
+  },
+  {
+    toolCalls: [{ name: 'web_search', params: 'query="<topic> latest"' }],
+    content: 'Here are the most recent findings on this topic. The data suggests several important trends.'
+  }
+];
+
+// -- Effective policy helper --
+function getEffectivePolicy(agent) {
+  const defaults = {
+    max_iterations: 5,
+    tool_timeout: 30,
+    token_budget: null,
+    on_timeout: 'terminate',
+    on_budget_exceeded: 'warn',
+    require_confirm: [],
+    tool_scopes: []
+  };
+  const policyNames = agent.assignedPolicies || [];
+  policyNames.forEach(function(pName) {
+    const policy = POLICIES.find(function(p) { return p.name === pName; });
+    if (!policy) return;
+    if (policy.max_iterations !== undefined) defaults.max_iterations = policy.max_iterations;
+    if (policy.tool_timeout !== undefined) defaults.tool_timeout = policy.tool_timeout;
+    if (policy.token_budget !== undefined) defaults.token_budget = policy.token_budget;
+    if (policy.on_timeout !== undefined) defaults.on_timeout = policy.on_timeout;
+    if (policy.on_budget_exceeded !== undefined) defaults.on_budget_exceeded = policy.on_budget_exceeded;
+    if (policy.require_confirm !== undefined) {
+      // Concatenate arrays
+      defaults.require_confirm = defaults.require_confirm.concat(policy.require_confirm);
+    }
+    if (policy.tool_scopes !== undefined) {
+      // Concatenate scope arrays (later rules take precedence by being checked last)
+      defaults.tool_scopes = defaults.tool_scopes.concat(policy.tool_scopes);
+    }
+  });
+  // Deduplicate require_confirm
+  defaults.require_confirm = Array.from(new Set(defaults.require_confirm));
+  return defaults;
+}
+
+// Compute effective policy from a list of policy names (for preview in modal)
+function getEffectivePolicyFromNames(policyNames) {
+  var fakeAgent = { assignedPolicies: policyNames };
+  return getEffectivePolicy(fakeAgent);
+}
+
+// -- Get tools available to an agent --
+function getAgentTools(agent) {
+  let tools = [];
+  const skillNames = agent.allowUnassignedSkills
+    ? SKILLS.map(s => s.name)
+    : (agent.assignedSkills || []);
+  skillNames.forEach(sn => {
+    const skill = SKILLS.find(s => s.name === sn);
+    if (skill) tools = tools.concat(skill.tools);
+  });
+  return tools;
+}
+
+// -- Status helpers --
+function statusDotClass(status) {
+  if (status === 'running') return 'dot-green';
+  if (status === 'paused') return 'dot-yellow';
+  return 'dot-gray';
+}
+
+function statusBadgeClass(status) {
+  if (status === 'running') return 'badge-status-running';
+  if (status === 'paused') return 'badge-status-paused';
+  return 'badge-status-stopped';
+}
+
+function setAgentStatus(idx, newStatus) {
+  if (idx >= 0 && idx < AGENTS.length) {
+    var agent = AGENTS[idx];
+    // If it's a live agent, hit the REST API
+    if (agent._live && agent._session_id) {
+      var actionMap = { 'paused': 'pause', 'running': 'resume', 'stopped': 'stop' };
+      var action = actionMap[newStatus];
+      if (action) {
+        liveAgentAction(agent._session_id, action);
+        return;
+      }
+    }
+    agent.status = newStatus;
+    renderAll();
+    if (chatOpenAgent === agent.name) {
+      renderChatPanel();
+    }
+  }
+}
+
+function renderStatusControls(idx) {
+  const agent = AGENTS[idx];
+  const st = agent.status || 'stopped';
+  let html = '';
+  if (st === 'running') {
+    html += '<button class="status-ctrl-btn btn-pause" title="Pause" onclick="event.stopPropagation();setAgentStatus(' + idx + ',\'paused\')">&#x23F8;</button>';
+    html += '<button class="status-ctrl-btn btn-stop" title="Stop" onclick="event.stopPropagation();setAgentStatus(' + idx + ',\'stopped\')">&#x23F9;</button>';
+  } else if (st === 'paused') {
+    html += '<button class="status-ctrl-btn btn-play" title="Resume" onclick="event.stopPropagation();setAgentStatus(' + idx + ',\'running\')">&#x25B6;</button>';
+    html += '<button class="status-ctrl-btn btn-stop" title="Stop" onclick="event.stopPropagation();setAgentStatus(' + idx + ',\'stopped\')">&#x23F9;</button>';
+  } else {
+    html += '<button class="status-ctrl-btn btn-play" title="Start" onclick="event.stopPropagation();setAgentStatus(' + idx + ',\'running\')">&#x25B6;</button>';
+  }
+  return html;
+}
+
+// -- Tabs --
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('sec-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// -- Collapsible --
+function toggleCollapsible(el) {
+  el.classList.toggle('open');
+  el.nextElementSibling.classList.toggle('open');
+}
+
+// -- Render helpers --
+function renderTags(arr, cls) {
+  if (!arr || !arr.length) return '';
+  const c = cls || '';
+  return '<div class="tags">' + arr.map(t => '<span class="tag ' + c + '">' + esc(t) + '</span>').join('') + '</div>';
+}
+
+function renderToolDetail(tool) {
+  let html = '<div class="tool-item"><span class="tool-name">' + esc(tool.name) + '</span>';
+  if (tool.description) html += ' <span class="tool-desc">&mdash; ' + esc(tool.description) + '</span>';
+  if (tool.parameters && tool.parameters.length) {
+    html += '<div class="param-list">';
+    tool.parameters.forEach(p => {
+      html += '<div class="param"><span class="pname">' + esc(p.name) + '</span>';
+      html += ' <span class="ptype">' + esc(p.type || 'string') + '</span>';
+      if (p.required) html += ' <span class="preq">required</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderEffectivePolicyHtml(ep) {
+  let html = '';
+  html += '<div class="detail-row"><span class="detail-label">Max iterations</span><span class="detail-value">' + ep.max_iterations + '</span></div>';
+  html += '<div class="detail-row"><span class="detail-label">Tool timeout</span><span class="detail-value">' + ep.tool_timeout + 's</span></div>';
+  if (ep.token_budget) html += '<div class="detail-row"><span class="detail-label">Token budget</span><span class="detail-value">' + ep.token_budget.toLocaleString() + ' tokens</span></div>';
+  if (ep.dollar_budget) html += '<div class="detail-row"><span class="detail-label">Dollar budget</span><span class="detail-value" style="color:var(--green);">$' + ep.dollar_budget.toFixed(2) + '</span></div>';
+  html += '<div class="detail-row"><span class="detail-label">On timeout</span><span class="detail-value">' + esc(ep.on_timeout) + '</span></div>';
+  html += '<div class="detail-row"><span class="detail-label">On budget exceeded</span><span class="detail-value">' + esc(ep.on_budget_exceeded) + '</span></div>';
+  if (ep.require_confirm && ep.require_confirm.length) {
+    html += '<div class="detail-row"><span class="detail-label">Require confirm</span><span class="detail-value" style="color:var(--red)">' + ep.require_confirm.map(esc).join(', ') + '</span></div>';
+  }
+  if (ep.tool_scopes && ep.tool_scopes.length) {
+    html += renderToolScopesHtml(ep.tool_scopes);
+  }
+  return html;
+}
+
+function renderToolScopesHtml(scopes) {
+  let html = '';
+  scopes.forEach(function(scope) {
+    html += '<div class="detail-row" style="flex-direction:column; align-items:flex-start;">';
+    html += '<span class="detail-label" style="font-weight:600; color:var(--orange);">Scope: ' + esc(scope.tool_name) + '</span>';
+    if (scope.rules && scope.rules.length) {
+      scope.rules.forEach(function(rule) {
+        var vals = (rule.values || []).map(esc).join(', ');
+        html += '<div style="font-size:0.75rem; padding-left:0.5rem; color:var(--muted);">';
+        html += '<span style="color:var(--accent);">' + esc(rule.param) + '</span> ';
+        html += '<span style="color:' + (rule.constraint === 'block' ? 'var(--red)' : 'var(--green)') + ';">' + esc(rule.constraint) + '</span> ';
+        html += vals;
+        html += '</div>';
+      });
+    }
+    if (scope.max_calls_per_minute !== undefined) {
+      html += '<div style="font-size:0.75rem; padding-left:0.5rem; color:var(--muted);">Max calls/min: <span style="color:var(--yellow);">' + scope.max_calls_per_minute + '</span></div>';
+    }
+    html += '</div>';
+  });
+  return html;
+}
+
+function renderSupervision(agent) {
+  const policyNames = agent.assignedPolicies || [];
+  if (policyNames.length === 0) return '';
+  const ep = getEffectivePolicy(agent);
+
+  let html = '<div class="supervision-box"><div class="label"><span class="dot dot-green"></span> AgentHandler Active &mdash; ' + policyNames.map(esc).join(', ') + '</div>';
+  html += renderEffectivePolicyHtml(ep);
+  html += '</div>';
+  return html;
+}
+
+// -- Policy summary (brief text for checklist) --
+function policyFieldSummary(policy) {
+  var parts = [];
+  if (policy.max_iterations !== undefined) parts.push('max_iter:' + policy.max_iterations);
+  if (policy.tool_timeout !== undefined) parts.push('timeout:' + policy.tool_timeout + 's');
+  if (policy.token_budget !== undefined) parts.push('budget:' + policy.token_budget);
+  if (policy.on_timeout !== undefined) parts.push('on_timeout:' + policy.on_timeout);
+  if (policy.on_budget_exceeded !== undefined) parts.push('on_budget:' + policy.on_budget_exceeded);
+  if (policy.require_confirm !== undefined && policy.require_confirm.length) parts.push('confirm:' + policy.require_confirm.join(','));
+  if (policy.tool_scopes !== undefined && policy.tool_scopes.length) parts.push('scopes:' + policy.tool_scopes.map(function(s) { return s.tool_name; }).join(','));
+  return parts.join(' | ');
+}
+
+// -- Agent card --
+function renderAgentCard(agent, showActions) {
+  const tools = getAgentTools(agent);
+  const skillCount = (agent.assignedSkills || []).length;
+  const policyCount = (agent.assignedPolicies || []).length;
+  const idx = AGENTS.indexOf(agent);
+  const st = agent.status || 'stopped';
+
+  let html = '<div class="card">';
+  html += '<div class="card-header">';
+  html += '<div class="card-header-left">';
+  html += '<span class="dot ' + statusDotClass(st) + '"></span>';
+  html += '<span class="card-title">' + esc(agent.name) + '</span>';
+  html += '</div>';
+  html += '<div class="card-header-right">';
+  html += '<span class="badge ' + statusBadgeClass(st) + '">' + esc(st) + '</span> ';
+  html += '<span class="badge badge-blue">supervised</span> ';
+  html += '<span class="badge badge-green">' + skillCount + ' skill' + (skillCount !== 1 ? 's' : '') + '</span>';
+  if (policyCount > 0) html += ' <span class="badge badge-orange">' + policyCount + ' polic' + (policyCount !== 1 ? 'ies' : 'y') + '</span>';
+  if (agent.allowUnassignedSkills) html += ' <span class="badge badge-yellow">open</span>';
+  html += ' ' + renderStatusControls(idx);
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div class="card-desc">' + esc(agent.description) + '</div>';
+  if (agent.systemPrompt) {
+    html += '<div style="font-size:0.75rem; color:var(--text); background:var(--surface2); padding:0.4rem 0.55rem; border-radius:5px; margin:0.3rem 0; line-height:1.4; max-height:3.6em; overflow:hidden;">' + esc(agent.systemPrompt).substring(0, 200) + '</div>';
+  }
+  if (agent.task) {
+    html += '<div style="font-size:0.72rem; color:var(--cyan); margin:0.2rem 0;"><strong>Task:</strong> ' + esc(agent.task).substring(0, 120) + '</div>';
+  }
+  html += renderTags(agent.triggers);
+
+  // Show assigned skills
+  if (agent.assignedSkills && agent.assignedSkills.length) {
+    html += renderTags(agent.assignedSkills, 'tag-skill');
+  }
+
+  // Show assigned policies
+  if (agent.assignedPolicies && agent.assignedPolicies.length) {
+    html += renderTags(agent.assignedPolicies, 'tag-policy');
+  }
+
+  // Show tools
+  if (tools.length > 0) {
+    html += '<div class="collapsible-header" onclick="toggleCollapsible(this)"><span class="arrow">&#9654;</span> ' + tools.length + ' tool' + (tools.length !== 1 ? 's' : '') + ' available</div>';
+    html += '<div class="collapsible-body">';
+    tools.forEach(t => { html += renderToolDetail(t); });
+    html += '</div>';
+  }
+
+  html += renderSupervision(agent);
+
+  // Live agent: show budget info
+  if (agent._session) {
+    var s = agent._session;
+    html += '<div class="detail-row"><span class="detail-label">Iterations</span><span class="detail-value">' + s.iterations + ' / ' + s.iteration_limit + '</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">' + s.tokens_used + (s.token_limit ? ' / ' + s.token_limit : '') + '</span></div>';
+    if (s.resume_count > 0) {
+      html += '<div class="detail-row"><span class="detail-label">Resumes</span><span class="detail-value">' + s.resume_count + '</span></div>';
+    }
+    if (s.failure_reason) {
+      html += '<div style="font-size:0.75rem; color:var(--red); margin:0.3rem 0; padding:0.3rem 0.5rem; background:rgba(250,82,82,0.1); border-radius:4px;">' + esc(s.failure_reason) + '</div>';
+    }
+  }
+
+  // Card actions
+  html += '<div class="card-actions">';
+  html += '<button class="btn-secondary" onclick="openChatPanel(\'' + esc(agent.name) + '\')">Chat</button>';
+  if (showActions) {
+    if (agent._live) {
+      // Live agent — allow editing definition + API-backed controls
+      html += '<button class="btn-secondary" onclick="editLiveAgent(\'' + esc(agent._session_id) + '\')">Edit</button>';
+      if (st === 'stopped' || st === 'failed') {
+        html += '<button class="btn-secondary" onclick="liveAgentAction(\'' + esc(agent._session_id) + '\',\'restart\')">Restart</button>';
+      }
+    } else {
+      html += '<button class="btn-secondary" onclick="editAgent(' + idx + ')">Edit</button>';
+      html += '<button class="btn-secondary" onclick="deployAgent(' + idx + ')" style="background:var(--accent);color:#fff;border-color:var(--accent);">Deploy</button>';
+      html += '<button class="btn-secondary" onclick="exportAgent(' + idx + ')">Export JSON</button>';
+      html += '<button class="btn-danger" onclick="requestDeleteAgent(' + idx + ')">Delete</button>';
+    }
+  }
+  html += '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+// -- Skill card --
+function renderSkillCard(skill, showActions) {
+  const toolCount = skill.tools ? skill.tools.length : 0;
+  const idx = SKILLS.indexOf(skill);
+  const usedBy = AGENTS.filter(a => a.assignedSkills && a.assignedSkills.includes(skill.name));
+
+  let html = '<div class="card">';
+  html += '<div class="card-header"><span class="card-title">' + esc(skill.name) + '</span>';
+  html += '<span>';
+  html += '<span class="badge badge-green">' + toolCount + ' tool' + (toolCount !== 1 ? 's' : '') + '</span>';
+  if (usedBy.length) html += ' <span class="badge badge-blue">' + usedBy.length + ' agent' + (usedBy.length !== 1 ? 's' : '') + '</span>';
+  html += '</span></div>';
+
+  html += '<div class="card-desc">' + esc(skill.description) + '</div>';
+
+  if (usedBy.length) {
+    html += '<div style="font-size:0.75rem; color:var(--muted); margin-bottom:0.4rem;">Used by: ' + usedBy.map(a => '<strong>' + esc(a.name) + '</strong>').join(', ') + '</div>';
+  }
+
+  if (toolCount > 0) {
+    html += '<div class="collapsible-header" onclick="toggleCollapsible(this)"><span class="arrow">&#9654;</span> Tools</div>';
+    html += '<div class="collapsible-body">';
+    skill.tools.forEach(t => { html += renderToolDetail(t); });
+    html += '</div>';
+  }
+
+  if (showActions) {
+    html += '<div class="card-actions">';
+    html += '<button class="btn-secondary" onclick="editSkill(' + idx + ')">Edit</button>';
+    html += '<button class="btn-secondary" onclick="exportSkill(' + idx + ')">Export JSON</button>';
+    html += '<button class="btn-danger" onclick="requestDeleteSkill(' + idx + ')">Delete</button>';
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+// -- Policy card --
+function renderPolicyCard(policy, showActions) {
+  const idx = POLICIES.indexOf(policy);
+  const usedBy = AGENTS.filter(a => a.assignedPolicies && a.assignedPolicies.includes(policy.name));
+
+  let html = '<div class="card">';
+  html += '<div class="card-header"><span class="card-title" style="color:var(--orange);">' + esc(policy.name) + '</span>';
+  html += '<span>';
+  if (usedBy.length) html += '<span class="badge badge-blue">' + usedBy.length + ' agent' + (usedBy.length !== 1 ? 's' : '') + '</span> ';
+  html += '</span></div>';
+
+  html += '<div class="card-desc">' + esc(policy.description) + '</div>';
+
+  // Show only the fields this policy defines
+  var hasFields = false;
+  if (policy.max_iterations !== undefined) { hasFields = true; html += '<div class="detail-row"><span class="detail-label">Max iterations</span><span class="detail-value">' + policy.max_iterations + '</span></div>'; }
+  if (policy.tool_timeout !== undefined) { hasFields = true; html += '<div class="detail-row"><span class="detail-label">Tool timeout</span><span class="detail-value">' + policy.tool_timeout + 's</span></div>'; }
+  if (policy.token_budget !== undefined) { hasFields = true; html += '<div class="detail-row"><span class="detail-label">Token budget</span><span class="detail-value">' + policy.token_budget.toLocaleString() + '</span></div>'; }
+  if (policy.on_timeout !== undefined) { hasFields = true; html += '<div class="detail-row"><span class="detail-label">On timeout</span><span class="detail-value">' + esc(policy.on_timeout) + '</span></div>'; }
+  if (policy.on_budget_exceeded !== undefined) { hasFields = true; html += '<div class="detail-row"><span class="detail-label">On budget exceeded</span><span class="detail-value">' + esc(policy.on_budget_exceeded) + '</span></div>'; }
+  if (policy.require_confirm !== undefined && policy.require_confirm.length) { hasFields = true; html += '<div class="detail-row"><span class="detail-label">Require confirm</span><span class="detail-value" style="color:var(--red);">' + policy.require_confirm.map(esc).join(', ') + '</span></div>'; }
+  if (policy.tool_scopes !== undefined && policy.tool_scopes.length) { hasFields = true; html += renderToolScopesHtml(policy.tool_scopes); }
+
+  if (usedBy.length) {
+    html += '<div style="font-size:0.75rem; color:var(--muted); margin-top:0.4rem;">Used by: ' + usedBy.map(a => '<strong>' + esc(a.name) + '</strong>').join(', ') + '</div>';
+  }
+
+  if (showActions) {
+    html += '<div class="card-actions">';
+    html += '<button class="btn-secondary" onclick="editPolicy(' + idx + ')">Edit</button>';
+    html += '<button class="btn-secondary" onclick="exportPolicy(' + idx + ')">Export JSON</button>';
+    html += '<button class="btn-danger" onclick="requestDeletePolicy(' + idx + ')">Delete</button>';
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+// -- Render sections --
+function renderOverview() {
+  const totalTools = SKILLS.reduce((n, s) => n + (s.tools ? s.tools.length : 0), 0);
+  const runningCount = AGENTS.filter(a => a.status === 'running').length;
+  const pausedCount = AGENTS.filter(a => a.status === 'paused').length;
+  const stoppedCount = AGENTS.filter(a => a.status === 'stopped').length;
+
+  document.getElementById('sys-grid').innerHTML =
+    sysCard('$' + DEMO_COSTS.total_cost_usd.toFixed(2), 'This Month') +
+    sysCard(AGENTS.length, 'Agents') +
+    sysCard(SKILLS.length, 'Skills') +
+    sysCard(POLICIES.length, 'Policies') +
+    sysCard(totalTools, 'Tools') +
+    sysCard(DEMO_COSTS.total_calls, 'API Calls') +
+    sysCard(DEMO_COSTS.total_tokens.toLocaleString(), 'Tokens') +
+    sysCard(runningCount, 'Running') +
+    sysCard(pausedCount, 'Paused') +
+    sysCard(stoppedCount, 'Stopped');
+
+  document.getElementById('overview-agents').innerHTML =
+    AGENTS.map(a => renderAgentCard(a, false)).join('');
+
+  // Also load live agents into overview
+  var base = getSessionsApiBase();
+  var headers = getSessionsAuthHeaders();
+  fetch(base + '/sessions', { headers: headers })
+    .then(function(r) { return r.ok ? r.json() : []; })
+    .then(function(sessions) {
+      var liveAgents = sessions.map(function(s) { return sessionToAgent(s); });
+      var liveHtml = liveAgents.map(function(a) { return renderAgentCard(a, false); }).join('');
+      var existing = document.getElementById('overview-agents').innerHTML;
+      document.getElementById('overview-agents').innerHTML = liveHtml + existing;
+      // Update counts
+      var running = sessions.filter(function(s) { return s.status === 'running'; }).length;
+      var paused = sessions.filter(function(s) { return s.status === 'paused'; }).length;
+      var stopped = sessions.filter(function(s) { return s.status === 'stopped' || s.status === 'failed'; }).length;
+      document.getElementById('sys-grid').innerHTML =
+        sysCard('$' + DEMO_COSTS.total_cost_usd.toFixed(2), 'This Month') +
+        sysCard(AGENTS.length + sessions.length, 'Agents') +
+        sysCard(SKILLS.length, 'Skills') +
+        sysCard(POLICIES.length, 'Policies') +
+        sysCard(totalTools, 'Tools') +
+        sysCard(DEMO_COSTS.total_calls, 'API Calls') +
+        sysCard(DEMO_COSTS.total_tokens.toLocaleString(), 'Tokens') +
+        sysCard(runningCount + running, 'Running') +
+        sysCard(pausedCount + paused, 'Paused') +
+        sysCard(stoppedCount + stopped, 'Stopped');
+    })
+    .catch(function() {});
+}
+
+function sessionToAgent(s) {
+  // Convert a REST API session to the AGENTS format so renderAgentCard works
+  return {
+    name: s.agent_id,
+    description: 'Session: ' + s.session_id.slice(0, 12) + '...',
+    triggers: [],
+    assignedSkills: [],
+    allowUnassignedSkills: false,
+    status: s.status,
+    assignedPolicies: [],
+    _live: true,
+    _session_id: s.session_id,
+    _session: s,
+  };
+}
+
+function renderAgents() {
+  // Load live agents from REST API, then render all
+  var base = getSessionsApiBase();
+  var headers = getSessionsAuthHeaders();
+  fetch(base + '/sessions', { headers: headers })
+    .then(function(r) { return r.ok ? r.json() : []; })
+    .then(function(sessions) {
+      // Remove old live agents from AGENTS array
+      AGENTS = AGENTS.filter(function(a) { return !a._live; });
+      // Add live agents
+      sessions.forEach(function(s) { AGENTS.push(sessionToAgent(s)); });
+      // Render all with the same renderer
+      document.getElementById('agents-grid').innerHTML =
+        AGENTS.map(function(a) { return renderAgentCard(a, true); }).join('');
+    })
+    .catch(function() {
+      document.getElementById('agents-grid').innerHTML =
+        AGENTS.map(function(a) { return renderAgentCard(a, true); }).join('');
+    });
+}
+
+function liveAgentAction(sessionId, action) {
+  var base = getSessionsApiBase();
+  var headers = getSessionsAuthHeaders();
+  fetch(base + '/sessions/' + sessionId + '/' + action, { method: 'POST', headers: headers })
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function() { renderAgents(); renderOverview(); })
+    .catch(function(err) { alert('Action failed: ' + err.message); });
+}
+
+function renderSkills() {
+  document.getElementById('skills-grid').innerHTML =
+    SKILLS.map(s => renderSkillCard(s, true)).join('');
+}
+
+function renderCosts() {
+  // Try to fetch real cost data from the REST API; fall back to demo data.
+  var base = getSessionsApiBase();
+  var headers = getSessionsAuthHeaders();
+  fetch(base + '/metrics/costs', { headers: headers })
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(live) {
+      if (live && live.total_calls > 0) {
+        renderCostsFromLive(live);
+      } else {
+        renderCostsFromDemo(DEMO_COSTS);
+      }
+    })
+    .catch(function() { renderCostsFromDemo(DEMO_COSTS); });
+}
+
+function renderCostsFromLive(costs) {
+  document.getElementById('cost-totals').innerHTML =
+    sysCard('$' + (costs.total_cost_usd || 0).toFixed(4), 'Total Cost') +
+    sysCard((costs.total_tokens || 0).toLocaleString(), 'Tokens') +
+    sysCard((costs.total_input_tokens || 0).toLocaleString(), 'Input') +
+    sysCard((costs.total_output_tokens || 0).toLocaleString(), 'Output') +
+    sysCard(costs.total_calls || 0, 'API Calls');
+
+  // No budgets from live data — leave the existing budgets section alone or clear it
+  document.getElementById('budgets-list').innerHTML =
+    '<div class="card"><div class="card-desc">Budgets are enforced per-session via Policy.token_budget. Live cost tracking above reflects actual spend.</div></div>';
+
+  // By agent
+  if (costs.by_agent && costs.by_agent.length) {
+    var html = '<div class="card"><table class="cost-table"><thead><tr><th>Agent</th><th>Calls</th><th>Tokens</th><th class="money">Cost</th></tr></thead><tbody>';
+    costs.by_agent.forEach(function(r) {
+      html += '<tr><td>' + esc(r.agent) + '</td><td>' + r.calls + '</td><td>' + (r.tokens || 0).toLocaleString() + '</td><td class="money">$' + (r.cost || 0).toFixed(6) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('cost-by-agent').innerHTML = html;
+  } else {
+    document.getElementById('cost-by-agent').innerHTML =
+      '<div class="card"><div class="card-desc">No tool calls yet — create a session and run a pipeline.</div></div>';
+  }
+
+  // By model (new section, show in hourly area)
+  var hourlyEl = document.getElementById('cost-hourly');
+  if (costs.by_model && costs.by_model.length) {
+    var html2 = '<div class="card"><table class="cost-table"><thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th class="money">Cost</th></tr></thead><tbody>';
+    costs.by_model.forEach(function(m) {
+      html2 += '<tr><td>' + esc(m.model) + '</td><td>' + m.calls + '</td>';
+      html2 += '<td>' + (m.input_tokens || 0).toLocaleString() + '</td>';
+      html2 += '<td>' + (m.output_tokens || 0).toLocaleString() + '</td>';
+      html2 += '<td class="money">$' + (m.cost || 0).toFixed(6) + '</td></tr>';
+    });
+    html2 += '</tbody></table></div>';
+    hourlyEl.innerHTML = html2;
+  } else {
+    hourlyEl.innerHTML = '<div class="card"><div class="card-desc">Breakdown by model appears once tools report which model they used (output.model field).</div></div>';
+  }
+}
+
+function renderCostsFromDemo(costs) {
+  document.getElementById('cost-totals').innerHTML =
+    sysCard('$' + costs.total_cost_usd.toFixed(4), 'This Month (demo)') +
+    sysCard(costs.total_tokens.toLocaleString(), 'Tokens') +
+    sysCard(costs.total_calls, 'API Calls');
+
+  if (costs.budgets.length) {
+    var html = '<div class="card-grid">';
+    costs.budgets.forEach(function(b) {
+      var pct = b.percent_used;
+      var cls = pct > 90 ? 'over' : pct > 70 ? 'warn' : 'ok';
+      html += '<div class="card">';
+      html += '<div class="card-header"><span class="card-title">' + esc(b.name) + '</span><span>';
+      if (b.hard_stop) html += '<span class="badge badge-red">hard stop</span> ';
+      html += '<span class="badge ' + (cls === 'over' ? 'badge-red' : cls === 'warn' ? 'badge-yellow' : 'badge-green') + '">' + pct + '%</span>';
+      html += '</span></div>';
+      html += '<div class="detail-row"><span class="detail-label">Limit</span><span class="detail-value">$' + b.limit_usd.toFixed(2) + ' / ' + esc(b.period) + '</span></div>';
+      html += '<div class="detail-row"><span class="detail-label">Spent</span><span class="detail-value">$' + b.spent_usd.toFixed(4) + '</span></div>';
+      html += '<div class="detail-row"><span class="detail-label">Remaining</span><span class="detail-value">$' + b.remaining_usd.toFixed(4) + '</span></div>';
+      html += '<div class="budget-bar"><div class="budget-fill ' + cls + '" style="width:' + Math.min(100, pct) + '%"></div></div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    document.getElementById('budgets-list').innerHTML = html;
+  }
+
+  if (costs.by_agent.length) {
+    var html3 = '<div class="card"><table class="cost-table"><thead><tr><th>Agent</th><th>Calls</th><th>Tokens</th><th class="money">Cost</th></tr></thead><tbody>';
+    costs.by_agent.forEach(function(r) {
+      html3 += '<tr><td>' + esc(r.agent) + '</td><td>' + r.calls + '</td><td>' + r.tokens.toLocaleString() + '</td><td class="money">$' + r.cost.toFixed(4) + '</td></tr>';
+    });
+    html3 += '</tbody></table></div>';
+    document.getElementById('cost-by-agent').innerHTML = html3;
+  }
+
+  if (costs.hourly_24h.length) {
+    var maxCost = Math.max.apply(null, costs.hourly_24h.map(function(h) { return h.cost; }).concat([0.0001]));
+    var html4 = '<div class="card"><div class="hourly-chart">';
+    costs.hourly_24h.forEach(function(h) {
+      var pct = Math.max(2, (h.cost / maxCost) * 100);
+      var hour = h.hour ? h.hour.slice(11, 16) : '';
+      html4 += '<div class="hourly-bar" style="height:' + pct + '%" data-label="' + hour + ': $' + h.cost.toFixed(4) + ' (' + h.calls + ' calls)"></div>';
+    });
+    html4 += '</div></div>';
+    document.getElementById('cost-hourly').innerHTML = html4;
+  }
+}
+
+function renderPolicies() {
+  document.getElementById('policy-grid').innerHTML =
+    POLICIES.map(p => renderPolicyCard(p, true)).join('');
+}
+
+// -- Chat Panel --
+function openChatPanel(agentName) {
+  chatOpenAgent = agentName;
+  if (!chatHistory[agentName]) {
+    chatHistory[agentName] = [];
+  }
+  renderChatPanel();
+  document.getElementById('chat-panel').classList.add('open');
+  setTimeout(() => {
+    document.getElementById('chat-input').focus();
+  }, 300);
+}
+
+function closeChatPanel() {
+  document.getElementById('chat-panel').classList.remove('open');
+  chatOpenAgent = null;
+}
+
+function renderChatPanel() {
+  if (!chatOpenAgent) return;
+  const agent = AGENTS.find(a => a.name === chatOpenAgent);
+  if (!agent) { closeChatPanel(); return; }
+
+  const st = agent.status || 'stopped';
+
+  document.getElementById('chat-panel-agent-name').textContent = agent.name;
+  const dotEl = document.getElementById('chat-panel-status-dot');
+  dotEl.className = 'dot ' + statusDotClass(st);
+
+  const bannerArea = document.getElementById('chat-panel-banner-area');
+  const agentIdx = AGENTS.indexOf(agent);
+  if (st === 'paused') {
+    bannerArea.innerHTML = '<div class="chat-panel-banner paused-banner">' +
+      '<span>Agent is paused. Resume to continue.</span>' +
+      '<button class="btn-banner-action" onclick="setAgentStatus(' + agentIdx + ',\'running\')">Resume</button>' +
+      '</div>';
+  } else if (st === 'stopped') {
+    bannerArea.innerHTML = '<div class="chat-panel-banner stopped-banner">' +
+      '<span>Agent is stopped. Start to begin.</span>' +
+      '<button class="btn-banner-action" onclick="setAgentStatus(' + agentIdx + ',\'running\')">Start</button>' +
+      '</div>';
+  } else {
+    bannerArea.innerHTML = '';
+  }
+
+  const msgs = chatHistory[chatOpenAgent] || [];
+  const msgContainer = document.getElementById('chat-messages');
+  let html = '';
+  msgs.forEach(msg => {
+    if (msg.toolCalls && msg.toolCalls.length && !msg.content) {
+      html += '<div class="chat-msg agent">';
+      html += '<div class="msg-role">agent</div>';
+      msg.toolCalls.forEach(tc => {
+        html += '<div class="chat-tool-call"><span class="tool-call-name">' + esc(tc.name) + '</span>';
+        if (tc.params) html += '<span class="tool-call-params">(' + esc(tc.params) + ')</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    } else if (msg.toolCalls && msg.toolCalls.length && msg.content) {
+      html += '<div class="chat-msg agent">';
+      html += '<div class="msg-role">agent</div>';
+      msg.toolCalls.forEach(tc => {
+        html += '<div class="chat-tool-call"><span class="tool-call-name">' + esc(tc.name) + '</span>';
+        if (tc.params) html += '<span class="tool-call-params">(' + esc(tc.params) + ')</span>';
+        html += '</div>';
+      });
+      html += '<div style="margin-top:0.35rem;">' + esc(msg.content) + '</div>';
+      html += '</div>';
+    } else if (msg.role === 'user') {
+      html += '<div class="chat-msg user">';
+      html += '<div class="msg-role">you</div>';
+      html += esc(msg.content);
+      html += '</div>';
+    } else {
+      html += '<div class="chat-msg agent">';
+      html += '<div class="msg-role">agent</div>';
+      html += esc(msg.content);
+      html += '</div>';
+    }
+  });
+  msgContainer.innerHTML = html;
+  msgContainer.scrollTop = msgContainer.scrollHeight;
+}
+
+function sendChatMessage() {
+  if (!chatOpenAgent) return;
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+
+  if (!chatHistory[chatOpenAgent]) chatHistory[chatOpenAgent] = [];
+
+  chatHistory[chatOpenAgent].push({ role: 'user', content: text });
+  input.value = '';
+  renderChatPanel();
+
+  // Show typing indicator
+  chatHistory[chatOpenAgent].push({ role: 'agent', content: '...' });
+  renderChatPanel();
+
+  // Get the full agent config to send to the backend
+  var agent = AGENTS.find(function(a) { return a.name === chatOpenAgent; });
+  var agentConfig = agent ? {
+    systemPrompt: agent.systemPrompt || agent.description || '',
+    task: agent.task || '',
+    assignedSkills: agent.assignedSkills || [],
+    tokenBudget: agent.tokenBudget || null,
+    maxIterations: agent.maxIterations || 10,
+    toolTimeout: agent.toolTimeout || 30,
+    _allSkills: SKILLS,
+    policy: {}
+  } : {};
+
+  // Build policy from assigned policies
+  if (agent && agent.assignedPolicies) {
+    var ep = getEffectivePolicyFromNames(agent.assignedPolicies);
+    agentConfig.policy = ep;
+    if (agent.tokenBudget) agentConfig.policy.token_budget = agent.tokenBudget;
+    if (agent.maxIterations) agentConfig.policy.max_iterations = agent.maxIterations;
+    if (agent.toolTimeout) agentConfig.policy.tool_timeout = agent.toolTimeout;
+  }
+
+  fetch('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      agent_name: chatOpenAgent,
+      message: text,
+      agent_config: agentConfig
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      // Remove typing indicator
+      var msgs = chatHistory[chatOpenAgent];
+      if (msgs && msgs.length && msgs[msgs.length - 1].content === '...') {
+        msgs.pop();
+      }
+
+      if (data.error) {
+        msgs.push({ role: 'agent', content: '[Error: ' + data.error + ']' });
+      } else {
+        var msg = { role: 'agent', content: data.content || '' };
+        if (data.tool_calls && data.tool_calls.length) {
+          msg.toolCalls = data.tool_calls;
+        }
+        msgs.push(msg);
+
+        // Update budget display if available
+        if (data.budget && agent) {
+          agent._chatBudget = data.budget;
+        }
+      }
+      renderChatPanel();
+    })
+    .catch(function(err) {
+      var msgs = chatHistory[chatOpenAgent];
+      if (msgs && msgs.length && msgs[msgs.length - 1].content === '...') {
+        msgs.pop();
+      }
+      msgs.push({ role: 'agent', content: '[Error: ' + err.message + ']' });
+      renderChatPanel();
+    });
+}
+
+// Handle Enter key in chat input
+document.getElementById('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+
+// -- Natural language agent builder --
+document.getElementById('btn-create-agent-nl').addEventListener('click', () => {
+  const input = document.getElementById('agent-builder-input');
+  const status = document.getElementById('agent-builder-status');
+  const desc = input.value.trim();
+  if (!desc) return;
+
+  status.className = 'builder-status';
+  status.textContent = 'Generating prompt...';
+
+  // Send available skills + policies so the LLM can recommend
+  var skillsForLLM = SKILLS.map(function(s) { return { name: s.name, description: s.description }; });
+  var policiesForLLM = POLICIES.map(function(p) { return { name: p.name, description: p.description }; });
+
+  fetch('/generate-prompt', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      description: desc,
+      available_skills: skillsForLLM,
+      available_policies: policiesForLLM
+    })
+  })
+    .then(r => r.json())
+    .then(data => {
+      var schedule = data.schedule || {};
+      var newAgent = {
+        name: data.name || 'custom-agent',
+        description: desc,
+        systemPrompt: data.system_prompt || desc,
+        task: data.task || '',
+        triggers: [],
+        assignedSkills: data.skills || [],
+        allowUnassignedSkills: false,
+        status: 'stopped',
+        assignedPolicies: data.policies || ['rate-limiter'],
+        tokenBudget: data.token_budget || null,
+        maxIterations: data.max_iterations || null,
+        pipelinePoml: data.pipeline || null,
+        _schedule: schedule,
+      };
+      AGENTS.push(newAgent);
+      _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+
+      status.className = 'builder-status success';
+      status.textContent = 'Generated — review and save';
+      input.value = '';
+      renderAll();
+      openAgentModal(AGENTS.length - 1);
+
+      // Apply schedule recommendation after modal opens
+      if (schedule.mode && schedule.mode !== 'ondemand') {
+        document.getElementById('agent-trigger-mode').value = schedule.mode;
+        if (document.getElementById('agent-trigger-mode').onchange) document.getElementById('agent-trigger-mode').onchange();
+        if (schedule.mode === 'interval' && schedule.interval_minutes) {
+          document.getElementById('agent-trigger-interval').value = schedule.interval_minutes;
+        }
+        if (schedule.mode === 'cron' && schedule.cron_expression) {
+          document.getElementById('agent-trigger-cron').value = schedule.cron_expression;
+        }
+      }
+    })
+    .catch(err => {
+      // Fallback: use raw description as prompt
+      var name = desc.split(/\s+/).slice(0, 3).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '').substring(0, 30) || 'custom-agent';
+      var newAgent = {
+        name: name,
+        description: desc,
+        systemPrompt: desc,
+        task: '',
+        triggers: [],
+        assignedSkills: [],
+        allowUnassignedSkills: false,
+        status: 'stopped',
+        assignedPolicies: ['rate-limiter']
+      };
+      AGENTS.push(newAgent);
+      _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+      status.className = 'builder-status';
+      status.textContent = 'LLM unavailable — edit manually';
+      input.value = '';
+      renderAll();
+      openAgentModal(AGENTS.length - 1);
+    });
+});
+
+// -- Natural language skill builder --
+document.getElementById('btn-create-skill-nl').addEventListener('click', () => {
+  const input = document.getElementById('skill-builder-input');
+  const status = document.getElementById('skill-builder-status');
+  const desc = input.value.trim();
+  if (!desc) return;
+
+  status.className = 'builder-status';
+  status.textContent = 'Generating skill...';
+
+  setTimeout(() => {
+    const name = desc.split(/\s+/).slice(0, 2).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
+    SKILLS.push({
+      name: name || 'custom-skill',
+      description: desc,
+      tools: []
+    });
+    status.className = 'builder-status success';
+    status.textContent = 'Created: ' + (name || 'custom-skill');
+    input.value = '';
+    renderAll();
+  }, 800);
+});
+
+// -- Agent Modal --
+let editingAgentIdx = -1;
+let allowUnassignedOn = false;
+
+function generateSystemPrompt() {
+  var promptEl = document.getElementById('agent-system-prompt');
+  var statusEl = document.getElementById('refine-status');
+  var btn = document.getElementById('btn-generate-prompt');
+  var rawText = promptEl.value.trim();
+
+  if (!rawText) { statusEl.textContent = 'Write what you want the agent to do first.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  statusEl.textContent = 'Calling Claude...';
+
+  var skillsForLLM = SKILLS.map(function(s) { return { name: s.name, description: s.description }; });
+  var policiesForLLM = POLICIES.map(function(p) { return { name: p.name, description: p.description }; });
+
+  fetch('/generate-prompt', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      description: rawText,
+      available_skills: skillsForLLM,
+      available_policies: policiesForLLM
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      promptEl.value = data.system_prompt || rawText;
+
+      var nameEl = document.getElementById('agent-name');
+      var taskEl = document.getElementById('agent-task');
+      if (data.name && (!nameEl.value || nameEl.value === nameEl.defaultValue)) {
+        nameEl.value = data.name;
+      }
+      if (data.task && !taskEl.value) {
+        taskEl.value = data.task;
+      }
+
+      // Apply recommended skills
+      if (data.skills && data.skills.length) {
+        document.querySelectorAll('#agent-skill-checklist input[type="checkbox"]').forEach(function(cb) {
+          cb.checked = data.skills.includes(cb.value);
+        });
+      }
+
+      // Apply recommended policies
+      if (data.policies && data.policies.length) {
+        document.querySelectorAll('#agent-policy-checklist input[type="checkbox"]').forEach(function(cb) {
+          cb.checked = data.policies.includes(cb.value);
+        });
+        updateAgentEffectivePolicyPreview();
+      }
+
+      // Apply budget recommendations
+      if (data.token_budget) {
+        document.getElementById('agent-token-budget').value = data.token_budget;
+      }
+      if (data.max_iterations) {
+        document.getElementById('agent-max-iterations').value = data.max_iterations;
+      }
+
+      // Apply schedule
+      var schedule = data.schedule || {};
+      if (schedule.mode && schedule.mode !== 'ondemand') {
+        var modeEl = document.getElementById('agent-trigger-mode');
+        modeEl.value = schedule.mode;
+        if (modeEl.onchange) modeEl.onchange();
+        if (schedule.mode === 'interval' && schedule.interval_minutes) {
+          document.getElementById('agent-trigger-interval').value = schedule.interval_minutes;
+        }
+        if (schedule.mode === 'cron' && schedule.cron_expression) {
+          document.getElementById('agent-trigger-cron').value = schedule.cron_expression;
+        }
+      }
+
+      // Apply pipeline if generated
+      if (data.pipeline) {
+        document.getElementById('agent-pipeline-poml').value = data.pipeline;
+        parsePomlToSteps();
+      }
+
+      updateAgentEffectivePolicyPreview();
+      var stepCount = document.querySelectorAll('#pipeline-steps-editor .pipeline-step').length;
+      statusEl.textContent = 'Generated. Skills, policies, schedule' + (stepCount ? ', and ' + stepCount + '-step pipeline' : '') + ' auto-applied. Review everything, then save.';
+      btn.disabled = false;
+      btn.textContent = 'Generate Prompt';
+    })
+    .catch(function(err) {
+      statusEl.textContent = 'Generation failed: ' + err.message;
+      btn.disabled = false;
+      btn.textContent = 'Generate Prompt';
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline visual editor
+// ---------------------------------------------------------------------------
+
+function getAvailableTools() {
+  // Collect tools from all skills
+  var tools = [];
+  SKILLS.forEach(function(s) {
+    if (s.tools) s.tools.forEach(function(t) {
+      if (!tools.find(function(x) { return x.name === t.name; })) {
+        tools.push({ name: t.name, description: t.description || '' });
+      }
+    });
+  });
+  return tools;
+}
+
+function addPipelineStep(tool, instruction) {
+  var editor = document.getElementById('pipeline-steps-editor');
+  var tools = getAvailableTools();
+  var idx = editor.querySelectorAll('.pipeline-step').length + 1;
+
+  var div = document.createElement('div');
+  div.className = 'pipeline-step';
+  div.style.cssText = 'background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:0.5rem 0.6rem; display:flex; gap:0.5rem; align-items:flex-start;';
+
+  var stepNum = document.createElement('span');
+  stepNum.style.cssText = 'font-size:0.72rem; color:var(--accent); font-weight:700; min-width:18px; padding-top:0.25rem;';
+  stepNum.textContent = idx;
+  div.appendChild(stepNum);
+
+  var fields = document.createElement('div');
+  fields.style.cssText = 'flex:1; display:flex; flex-direction:column; gap:0.3rem;';
+
+  // Tool selector — dropdown + custom option
+  var toolSelect = document.createElement('select');
+  toolSelect.className = 'form-input pipeline-step-tool';
+  toolSelect.style.cssText = 'font-size:0.78rem; padding:0.25rem 0.4rem;';
+  var optCustom = document.createElement('option');
+  optCustom.value = ''; optCustom.textContent = '— select tool —';
+  toolSelect.appendChild(optCustom);
+  tools.forEach(function(t) {
+    var opt = document.createElement('option');
+    opt.value = t.name; opt.textContent = t.name + (t.description ? ' — ' + t.description.substring(0, 40) : '');
+    if (tool === t.name) opt.selected = true;
+    toolSelect.appendChild(opt);
+  });
+  // Custom tool name option
+  var optOther = document.createElement('option');
+  optOther.value = '__custom__'; optOther.textContent = '(custom tool name)';
+  toolSelect.appendChild(optOther);
+  fields.appendChild(toolSelect);
+
+  // Custom tool name input (hidden by default)
+  var customInput = document.createElement('input');
+  customInput.className = 'form-input pipeline-step-custom-tool';
+  customInput.placeholder = 'tool name';
+  customInput.style.cssText = 'font-size:0.78rem; display:none; padding:0.25rem 0.4rem;';
+  if (tool && !tools.find(function(t) { return t.name === tool; })) {
+    toolSelect.value = '__custom__';
+    customInput.style.display = '';
+    customInput.value = tool;
+  }
+  toolSelect.onchange = function() {
+    customInput.style.display = this.value === '__custom__' ? '' : 'none';
+    syncStepsToPoml();
+  };
+  fields.appendChild(customInput);
+
+  // Instruction
+  var instrInput = document.createElement('input');
+  instrInput.className = 'form-input pipeline-step-instruction';
+  instrInput.placeholder = 'What should this step do?';
+  instrInput.value = instruction || '';
+  instrInput.style.cssText = 'font-size:0.78rem; padding:0.25rem 0.4rem;';
+  instrInput.oninput = syncStepsToPoml;
+  fields.appendChild(instrInput);
+
+  div.appendChild(fields);
+
+  // Controls
+  var controls = document.createElement('div');
+  controls.style.cssText = 'display:flex; flex-direction:column; gap:0.2rem;';
+  var btnUp = document.createElement('button');
+  btnUp.className = 'btn-secondary';
+  btnUp.style.cssText = 'font-size:0.6rem; padding:0.1rem 0.3rem; line-height:1;';
+  btnUp.textContent = '▲';
+  btnUp.onclick = function() { moveStep(div, -1); };
+  var btnDown = document.createElement('button');
+  btnDown.className = 'btn-secondary';
+  btnDown.style.cssText = 'font-size:0.6rem; padding:0.1rem 0.3rem; line-height:1;';
+  btnDown.textContent = '▼';
+  btnDown.onclick = function() { moveStep(div, 1); };
+  var btnDel = document.createElement('button');
+  btnDel.style.cssText = 'font-size:0.65rem; padding:0.1rem 0.3rem; line-height:1; color:var(--red); background:none; border:1px solid var(--red); border-radius:4px; cursor:pointer;';
+  btnDel.textContent = '✕';
+  btnDel.onclick = function() { div.remove(); renumberSteps(); syncStepsToPoml(); };
+  controls.appendChild(btnUp);
+  controls.appendChild(btnDown);
+  controls.appendChild(btnDel);
+  div.appendChild(controls);
+
+  editor.appendChild(div);
+  syncStepsToPoml();
+}
+
+function moveStep(stepDiv, direction) {
+  var parent = stepDiv.parentNode;
+  var steps = Array.from(parent.querySelectorAll('.pipeline-step'));
+  var idx = steps.indexOf(stepDiv);
+  var newIdx = idx + direction;
+  if (newIdx < 0 || newIdx >= steps.length) return;
+  if (direction < 0) {
+    parent.insertBefore(stepDiv, steps[newIdx]);
+  } else {
+    parent.insertBefore(stepDiv, steps[newIdx].nextSibling);
+  }
+  renumberSteps();
+  syncStepsToPoml();
+}
+
+function renumberSteps() {
+  var steps = document.querySelectorAll('#pipeline-steps-editor .pipeline-step');
+  steps.forEach(function(s, i) {
+    s.querySelector('span').textContent = i + 1;
+  });
+}
+
+function syncStepsToPoml() {
+  var steps = document.querySelectorAll('#pipeline-steps-editor .pipeline-step');
+  if (steps.length === 0) {
+    document.getElementById('agent-pipeline-poml').value = '';
+    return;
+  }
+  var xml = '<pipeline>\n';
+  steps.forEach(function(s) {
+    var toolSelect = s.querySelector('.pipeline-step-tool');
+    var customTool = s.querySelector('.pipeline-step-custom-tool');
+    var tool = toolSelect.value === '__custom__' ? customTool.value : toolSelect.value;
+    var instr = s.querySelector('.pipeline-step-instruction').value;
+    if (tool) {
+      xml += '  <step tool="' + tool.replace(/"/g, '&quot;') + '">' + (instr || '...') + '</step>\n';
+    }
+  });
+  xml += '</pipeline>';
+  document.getElementById('agent-pipeline-poml').value = xml;
+}
+
+function parsePomlToSteps() {
+  var poml = document.getElementById('agent-pipeline-poml').value;
+  var editor = document.getElementById('pipeline-steps-editor');
+  editor.innerHTML = '';
+  if (!poml.trim()) return;
+
+  var stepRegex = /<step\s+tool="([^"]*)"[^>]*>([\s\S]*?)<\/step>/g;
+  var match;
+  while ((match = stepRegex.exec(poml)) !== null) {
+    addPipelineStep(match[1], match[2].trim());
+  }
+}
+
+function togglePipelineRaw() {
+  var ta = document.getElementById('agent-pipeline-poml');
+  var btn = document.getElementById('btn-toggle-poml');
+  if (ta.style.display === 'none') {
+    ta.style.display = '';
+    btn.textContent = 'Hide POML';
+    // Sync visual to raw before showing
+    syncStepsToPoml();
+  } else {
+    ta.style.display = 'none';
+    btn.textContent = 'Show POML';
+    // Parse raw back to visual
+    parsePomlToSteps();
+  }
+}
+
+function generatePipeline() {
+  var input = document.getElementById('pipeline-nl-input');
+  var status = document.getElementById('pipeline-gen-status');
+  var btn = document.getElementById('btn-generate-pipeline');
+  var desc = input.value.trim();
+  if (!desc) { status.textContent = 'Describe the pipeline steps.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  status.textContent = 'Calling Claude...';
+
+  var tools = getAvailableTools();
+  var toolsDesc = tools.map(function(t) { return t.name + ': ' + (t.description || ''); }).join('\n');
+
+  fetch('/generate-pipeline', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ description: desc, available_tools: toolsDesc })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      // Set POML and parse to visual
+      document.getElementById('agent-pipeline-poml').value = data.poml || '';
+      parsePomlToSteps();
+      input.value = '';
+      status.textContent = 'Generated ' + document.querySelectorAll('#pipeline-steps-editor .pipeline-step').length + ' steps. Reorder or edit below.';
+      btn.disabled = false;
+      btn.textContent = 'Generate';
+    })
+    .catch(function(err) {
+      status.textContent = 'Failed: ' + err.message;
+      btn.disabled = false;
+      btn.textContent = 'Generate';
+    });
+}
+
+// ---------------------------------------------------------------------------
+
+function refineSystemPrompt() {
+  var promptEl = document.getElementById('agent-system-prompt');
+  var feedbackEl = document.getElementById('agent-refine-input');
+  var statusEl = document.getElementById('refine-status');
+  var btn = document.getElementById('btn-refine-prompt');
+  var currentPrompt = promptEl.value.trim();
+  var feedback = feedbackEl.value.trim();
+
+  if (!currentPrompt) { statusEl.textContent = 'Write a system prompt first, or use Create from Description.'; return; }
+  if (!feedback) { statusEl.textContent = 'Type what you want to change.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Refining...';
+  statusEl.textContent = 'Calling LLM...';
+
+  fetch('/generate-prompt', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ current_prompt: currentPrompt, feedback: feedback })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      promptEl.value = data.system_prompt || currentPrompt;
+      feedbackEl.value = '';
+      statusEl.textContent = 'Refined. Review the updated prompt above.';
+      btn.disabled = false;
+      btn.textContent = 'Refine with AI';
+    })
+    .catch(function(err) {
+      statusEl.textContent = 'Refine failed: ' + err.message;
+      btn.disabled = false;
+      btn.textContent = 'Refine with AI';
+    });
+}
+
+function openAgentModal(index) {
+  editingAgentIdx = typeof index === 'number' ? index : -1;
+  const isEdit = editingAgentIdx >= 0;
+  const agent = isEdit ? AGENTS[editingAgentIdx] : null;
+
+  document.getElementById('agent-modal-title').textContent = isEdit ? 'Edit Agent' : 'New Agent';
+  document.getElementById('btn-save-agent').textContent = isEdit ? 'Save Changes' : 'Create Agent';
+
+  document.getElementById('agent-name').value = isEdit ? agent.name : '';
+  document.getElementById('agent-desc').value = isEdit ? agent.description : '';
+  document.getElementById('agent-system-prompt').value = isEdit && agent.systemPrompt ? agent.systemPrompt : '';
+  document.getElementById('agent-task').value = isEdit && agent.task ? agent.task : '';
+  document.getElementById('agent-triggers').value = isEdit && agent.triggers ? agent.triggers.join(', ') : '';
+
+  // Allow unassigned toggle
+  allowUnassignedOn = isEdit ? !!agent.allowUnassignedSkills : false;
+  updateAllowUnassignedToggle();
+
+  // Skill checklist
+  const assignedSkills = isEdit ? (agent.assignedSkills || []) : [];
+  const skillChecklist = document.getElementById('agent-skill-checklist');
+  if (SKILLS.length === 0) {
+    skillChecklist.innerHTML = '<div class="no-skills-msg">No skills created yet. Create skills first in the Skills tab.</div>';
+  } else {
+    skillChecklist.innerHTML = SKILLS.map(s => {
+      const checked = assignedSkills.includes(s.name) ? ' checked' : '';
+      const toolCount = s.tools ? s.tools.length : 0;
+      return '<label class="skill-check-item"><input type="checkbox" value="' + esc(s.name) + '"' + checked + '>' +
+        '<span class="skill-check-name">' + esc(s.name) + '</span>' +
+        '<span class="skill-check-desc">' + toolCount + ' tool' + (toolCount !== 1 ? 's' : '') + '</span></label>';
+    }).join('');
+  }
+
+  // Policy checklist
+  const assignedPolicies = isEdit ? (agent.assignedPolicies || []) : ['rate-limiter'];
+  const policyChecklist = document.getElementById('agent-policy-checklist');
+  if (POLICIES.length === 0) {
+    policyChecklist.innerHTML = '<div class="no-policies-msg">No policies created yet. Create policies first in the Policies tab.</div>';
+  } else {
+    policyChecklist.innerHTML = POLICIES.map(p => {
+      const checked = assignedPolicies.includes(p.name) ? ' checked' : '';
+      const summary = policyFieldSummary(p);
+      return '<label class="policy-check-item"><input type="checkbox" value="' + esc(p.name) + '"' + checked + ' onchange="updateAgentEffectivePolicyPreview()">' +
+        '<span class="policy-check-name">' + esc(p.name) + '</span>' +
+        '<span class="policy-check-desc">' + esc(summary) + '</span></label>';
+    }).join('');
+  }
+
+  // Effective policy preview
+  updateAgentEffectivePolicyPreview();
+
+  // Budget overrides
+  document.getElementById('agent-token-budget').value = isEdit && agent.tokenBudget ? agent.tokenBudget : '';
+  document.getElementById('agent-dollar-budget').value = isEdit && agent.dollarBudget ? agent.dollarBudget : '';
+  document.getElementById('agent-max-iterations').value = isEdit && agent.maxIterations ? agent.maxIterations : '';
+  document.getElementById('agent-tool-timeout').value = isEdit && agent.toolTimeout ? agent.toolTimeout : '';
+
+  // Trigger mode
+  document.getElementById('agent-trigger-mode').value = 'ondemand';
+  document.getElementById('agent-trigger-interval-opts').style.display = 'none';
+  document.getElementById('agent-trigger-cron-opts').style.display = 'none';
+  // Pipeline editor
+  document.getElementById('agent-pipeline-poml').value = isEdit && agent.pipelinePoml ? agent.pipelinePoml : '';
+  document.getElementById('agent-pipeline-poml').style.display = 'none';
+  document.getElementById('btn-toggle-poml').textContent = 'Show POML';
+  document.getElementById('pipeline-nl-input').value = '';
+  document.getElementById('pipeline-gen-status').textContent = '';
+  parsePomlToSteps();
+
+  document.getElementById('agent-trigger-mode').onchange = function() {
+    var mode = this.value;
+    document.getElementById('agent-trigger-interval-opts').style.display = mode === 'interval' ? 'block' : 'none';
+    document.getElementById('agent-trigger-cron-opts').style.display = mode === 'cron' ? 'block' : 'none';
+  };
+
+  document.getElementById('agent-modal').classList.add('open');
+}
+
+function updateAgentEffectivePolicyPreview() {
+  var selected = [];
+  document.querySelectorAll('#agent-policy-checklist input[type="checkbox"]:checked').forEach(function(cb) {
+    selected.push(cb.value);
+  });
+  var ep = getEffectivePolicyFromNames(selected);
+
+  // Apply budget overrides from the direct input fields
+  var budgetVal = document.getElementById('agent-token-budget').value.trim();
+  var dollarVal = document.getElementById('agent-dollar-budget').value.trim();
+  var iterVal = document.getElementById('agent-max-iterations').value.trim();
+  var timeoutVal = document.getElementById('agent-tool-timeout').value.trim();
+  if (budgetVal) ep.token_budget = parseInt(budgetVal);
+  if (dollarVal) ep.dollar_budget = parseFloat(dollarVal);
+  if (iterVal) ep.max_iterations = parseInt(iterVal);
+  if (timeoutVal) ep.tool_timeout = parseInt(timeoutVal);
+
+  var contentEl = document.getElementById('agent-effective-policy-content');
+  if (selected.length === 0 && !budgetVal && !dollarVal && !iterVal && !timeoutVal) {
+    contentEl.innerHTML = '<div style="font-size:0.78rem; color:var(--muted); padding:0.2rem 0;">No policies selected. Defaults will apply.</div>';
+  } else {
+    contentEl.innerHTML = renderEffectivePolicyHtml(ep);
+  }
+}
+
+function closeAgentModal() {
+  document.getElementById('agent-modal').classList.remove('open');
+  editingAgentIdx = -1;
+}
+
+// Budget override fields update the effective policy preview live
+['agent-token-budget', 'agent-dollar-budget', 'agent-max-iterations', 'agent-tool-timeout'].forEach(function(id) {
+  document.getElementById(id).addEventListener('input', function() {
+    updateAgentEffectivePolicyPreview();
+    updateBudgetEstimate();
+  });
+});
+
+function updateBudgetEstimate() {
+  var el = document.getElementById('agent-budget-estimate');
+  var tokens = parseInt(document.getElementById('agent-token-budget').value) || 0;
+  var dollars = parseFloat(document.getElementById('agent-dollar-budget').value) || 0;
+  var parts = [];
+  if (tokens > 0) {
+    // Rough estimate: ~$3/1M input + ~$15/1M output for Sonnet, assume 60/40 split
+    var estCost = tokens * 0.000008;
+    parts.push('~$' + estCost.toFixed(4) + '/run at ' + tokens.toLocaleString() + ' tokens');
+  }
+  if (dollars > 0) {
+    parts.push('hard stop at $' + dollars.toFixed(2));
+  }
+  el.textContent = parts.length ? parts.join(' · ') : '';
+}
+
+function updateAllowUnassignedToggle() {
+  document.getElementById('allow-unassigned-track').classList.toggle('on', allowUnassignedOn);
+  const lbl = document.getElementById('allow-unassigned-label');
+  lbl.classList.toggle('on', allowUnassignedOn);
+  lbl.textContent = allowUnassignedOn ? 'Allow unassigned skills (ON)' : 'Allow unassigned skills';
+}
+
+document.getElementById('allow-unassigned-toggle').addEventListener('click', () => {
+  allowUnassignedOn = !allowUnassignedOn;
+  updateAllowUnassignedToggle();
+});
+
+function saveAgent() {
+  const name = document.getElementById('agent-name').value.trim();
+  const desc = document.getElementById('agent-desc').value.trim();
+  const systemPrompt = document.getElementById('agent-system-prompt').value.trim();
+  const task = document.getElementById('agent-task').value.trim();
+  if (!name) { alert('Agent name is required.'); return; }
+
+  const triggers = document.getElementById('agent-triggers').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  const assignedSkills = [];
+  document.querySelectorAll('#agent-skill-checklist input[type="checkbox"]:checked').forEach(cb => {
+    assignedSkills.push(cb.value);
+  });
+
+  const assignedPolicies = [];
+  document.querySelectorAll('#agent-policy-checklist input[type="checkbox"]:checked').forEach(cb => {
+    assignedPolicies.push(cb.value);
+  });
+
+  // Budget overrides
+  const tokenBudget = document.getElementById('agent-token-budget').value.trim();
+  const dollarBudget = document.getElementById('agent-dollar-budget').value.trim();
+  const maxIterations = document.getElementById('agent-max-iterations').value.trim();
+  const toolTimeout = document.getElementById('agent-tool-timeout').value.trim();
+
+  const data = {
+    name, description: desc, systemPrompt, task, triggers, assignedSkills,
+    allowUnassignedSkills: allowUnassignedOn,
+    pipelinePoml: document.getElementById('agent-pipeline-poml').value.trim() || null,
+    status: editingAgentIdx >= 0 ? (AGENTS[editingAgentIdx].status || 'stopped') : 'stopped',
+    assignedPolicies: assignedPolicies,
+    tokenBudget: tokenBudget ? parseInt(tokenBudget) : null,
+    dollarBudget: dollarBudget ? parseFloat(dollarBudget) : null,
+    maxIterations: maxIterations ? parseInt(maxIterations) : null,
+    toolTimeout: toolTimeout ? parseInt(toolTimeout) : null,
+  };
+
+  if (editingAgentIdx >= 0) {
+    AGENTS[editingAgentIdx] = data;
+  } else {
+    AGENTS.push(data);
+  }
+
+  _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+  closeAgentModal();
+  renderAll();
+}
+
+function editAgent(index) { openAgentModal(index); }
+
+function deployAgent(index) {
+  var agent = AGENTS[index];
+  if (!agent) return;
+
+  if (!agent.task && !agent.systemPrompt) {
+    alert('Agent needs a task or system prompt before deploying.');
+    return;
+  }
+
+  // Build policy from assigned policies + budget overrides
+  var ep = getEffectivePolicyFromNames(agent.assignedPolicies || []);
+  if (agent.tokenBudget) ep.token_budget = agent.tokenBudget;
+  if (agent.maxIterations) ep.max_iterations = agent.maxIterations;
+  if (agent.toolTimeout) ep.tool_timeout = agent.toolTimeout;
+
+  var policy = {};
+  if (ep.max_iterations) policy.max_iterations = ep.max_iterations;
+  if (ep.tool_timeout) policy.tool_timeout = ep.tool_timeout;
+  if (ep.token_budget) policy.token_budget = ep.token_budget;
+  if (ep.require_confirm && ep.require_confirm.length) policy.require_confirm = ep.require_confirm;
+
+  // Create session on the server
+  var base = getSessionsApiBase();
+  var headers = Object.assign({'Content-Type': 'application/json'}, getSessionsAuthHeaders());
+
+  fetch(base + '/sessions', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ agent_id: agent.name, policy: policy })
+  })
+    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(data) {
+      agent.status = 'running';
+      _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+      renderAll();
+      if (typeof fetchSessions === 'function') fetchSessions();
+
+      // Open chat panel and auto-run the task
+      openChatPanel(agent.name);
+      if (agent.task) {
+        document.getElementById('chat-input').value = agent.task;
+        sendChatMessage();
+      }
+    })
+    .catch(function(err) { alert('Deploy failed: ' + err.message); });
+}
+
+function editLiveAgent(sessionId) {
+  // Find the live agent by session ID and convert to an editable agent
+  var agent = AGENTS.find(function(a) { return a._session_id === sessionId; });
+  if (!agent) { alert('Agent not found'); return; }
+
+  // Create a local editable copy if one doesn't exist yet
+  var localIdx = AGENTS.findIndex(function(a) { return !a._live && a.name === agent.name; });
+  if (localIdx < 0) {
+    // Convert live agent to a local definition
+    var local = {
+      name: agent.name,
+      description: agent.description || '',
+      triggers: agent.triggers || [],
+      assignedSkills: agent.assignedSkills || [],
+      assignedPolicies: agent.assignedPolicies || [],
+      allowUnassignedSkills: agent.allowUnassignedSkills || false,
+      status: 'stopped',
+      tokenBudget: agent._session ? agent._session.token_limit : null,
+      maxIterations: agent._session ? agent._session.iteration_limit : null,
+      dollarBudget: agent.dollarBudget || null,
+      toolTimeout: agent.toolTimeout || null,
+    };
+    AGENTS.push(local);
+    localIdx = AGENTS.length - 1;
+  }
+  openAgentModal(localIdx);
+}
+
+// -- Skill Modal --
+let editingSkillIdx = -1;
+
+function openSkillModal(index) {
+  editingSkillIdx = typeof index === 'number' ? index : -1;
+  const isEdit = editingSkillIdx >= 0;
+  const skill = isEdit ? SKILLS[editingSkillIdx] : null;
+
+  document.getElementById('skill-modal-title').textContent = isEdit ? 'Edit Skill' : 'New Skill';
+  document.getElementById('btn-save-skill').textContent = isEdit ? 'Save Changes' : 'Create Skill';
+
+  document.getElementById('skill-name').value = isEdit ? skill.name : '';
+  document.getElementById('skill-desc').value = isEdit ? skill.description : '';
+
+  document.getElementById('skill-tools-editor').innerHTML = '';
+  if (isEdit && skill.tools) {
+    skill.tools.forEach(t => addToolEntry(t));
+  }
+
+  document.getElementById('skill-modal').classList.add('open');
+}
+
+function closeSkillModal() {
+  document.getElementById('skill-modal').classList.remove('open');
+  editingSkillIdx = -1;
+}
+
+function addToolEntry(existing) {
+  const editor = document.getElementById('skill-tools-editor');
+  const entry = document.createElement('div');
+  entry.className = 'tool-entry';
+
+  const tool = existing || { name: '', description: '', parameters: [] };
+  let html = '<div class="tool-entry-header">';
+  html += '<input class="form-input tool-name-input" placeholder="Tool name" value="' + esc(tool.name) + '">';
+  html += '<button class="btn-remove-tool" onclick="this.closest(\'.tool-entry\').remove()" title="Remove tool">&times;</button>';
+  html += '</div>';
+  html += '<input class="form-input tool-desc-input" placeholder="Description" value="' + esc(tool.description || '') + '" style="margin-bottom:0.3rem;">';
+  html += '<div class="params-list">';
+  if (tool.parameters && tool.parameters.length) {
+    tool.parameters.forEach(p => { html += renderParamEntry(p); });
+  }
+  html += '</div>';
+  html += '<button class="btn-add-param" onclick="addParamToTool(this)">+ Add parameter</button>';
+
+  entry.innerHTML = html;
+  editor.appendChild(entry);
+}
+
+function renderParamEntry(p) {
+  const param = p || { name: '', type: 'string', required: false };
+  return '<div class="param-entry">' +
+    '<input class="form-input param-name-input" placeholder="Param name" value="' + esc(param.name) + '">' +
+    '<select class="form-select param-type-input">' +
+      '<option value="string"' + (param.type === 'string' ? ' selected' : '') + '>string</option>' +
+      '<option value="integer"' + (param.type === 'integer' ? ' selected' : '') + '>integer</option>' +
+      '<option value="number"' + (param.type === 'number' ? ' selected' : '') + '>number</option>' +
+      '<option value="boolean"' + (param.type === 'boolean' ? ' selected' : '') + '>boolean</option>' +
+      '<option value="object"' + (param.type === 'object' ? ' selected' : '') + '>object</option>' +
+      '<option value="array"' + (param.type === 'array' ? ' selected' : '') + '>array</option>' +
+    '</select>' +
+    '<label><input type="checkbox" class="param-req-input"' + (param.required ? ' checked' : '') + '> req</label>' +
+    '<button class="btn-remove-tool" onclick="this.closest(\'.param-entry\').remove()" title="Remove">&times;</button>' +
+  '</div>';
+}
+
+function addParamToTool(btn) {
+  const paramsList = btn.previousElementSibling;
+  const div = document.createElement('div');
+  div.innerHTML = renderParamEntry();
+  paramsList.appendChild(div.firstElementChild);
+}
+
+function saveSkill() {
+  const name = document.getElementById('skill-name').value.trim();
+  const desc = document.getElementById('skill-desc').value.trim();
+  if (!name) { alert('Skill name is required.'); return; }
+
+  const tools = [];
+  document.querySelectorAll('#skill-tools-editor .tool-entry').forEach(entry => {
+    const toolName = entry.querySelector('.tool-name-input').value.trim();
+    if (!toolName) return;
+    const toolDesc = entry.querySelector('.tool-desc-input').value.trim();
+    const params = [];
+    entry.querySelectorAll('.param-entry').forEach(pe => {
+      const pName = pe.querySelector('.param-name-input').value.trim();
+      if (!pName) return;
+      params.push({
+        name: pName,
+        type: pe.querySelector('.param-type-input').value,
+        required: pe.querySelector('.param-req-input').checked
+      });
+    });
+    tools.push({ name: toolName, description: toolDesc, parameters: params });
+  });
+
+  const oldName = editingSkillIdx >= 0 ? SKILLS[editingSkillIdx].name : null;
+
+  const data = { name, description: desc, tools };
+
+  if (editingSkillIdx >= 0) {
+    SKILLS[editingSkillIdx] = data;
+    if (oldName && oldName !== name) {
+      AGENTS.forEach(a => {
+        if (a.assignedSkills) {
+          const idx = a.assignedSkills.indexOf(oldName);
+          if (idx >= 0) a.assignedSkills[idx] = name;
+        }
+      });
+    }
+  } else {
+    SKILLS.push(data);
+  }
+
+  _saveState('skills', SKILLS);
+  _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+  closeSkillModal();
+  renderAll();
+}
+
+function editSkill(index) { openSkillModal(index); }
+
+// -- Policy Modal --
+let editingPolicyIdx = -1;
+
+// Wire up policy field toggles (enable/disable inputs when checkbox toggled)
+var policyFieldIds = ['max-iter', 'timeout', 'token-budget', 'on-timeout', 'on-budget', 'require-confirm'];
+policyFieldIds.forEach(function(fid) {
+  var cb = document.getElementById('pf-' + fid + '-on');
+  var input = document.getElementById('pf-' + fid);
+  if (cb && input) {
+    cb.addEventListener('change', function() {
+      input.disabled = !cb.checked;
+    });
+  }
+});
+
+// -- Scope editor functions --
+function addScopeEntry(existing) {
+  var editor = document.getElementById('policy-scopes-editor');
+  var entry = document.createElement('div');
+  entry.className = 'scope-entry';
+
+  var scope = existing || { tool_name: '', rules: [], max_calls_per_minute: undefined };
+  var html = '<div class="scope-entry-header">';
+  html += '<input class="form-input scope-tool-name-input" placeholder="Tool name (e.g. write_file)" value="' + esc(scope.tool_name) + '">';
+  html += '<button class="btn-remove-tool" onclick="this.closest(\'.scope-entry\').remove()" title="Remove scope">&times;</button>';
+  html += '</div>';
+  html += '<div class="scope-rules-list">';
+  if (scope.rules && scope.rules.length) {
+    scope.rules.forEach(function(r) { html += renderScopeRuleEntry(r); });
+  }
+  html += '</div>';
+  html += '<button class="btn-add-rule" onclick="addRuleToScope(this)">+ Add Rule</button>';
+  html += '<div class="scope-max-calls">';
+  html += '<label>Max calls/min:</label>';
+  html += '<input class="form-input scope-max-calls-input" type="number" min="1" placeholder="(optional)" value="' + (scope.max_calls_per_minute !== undefined ? scope.max_calls_per_minute : '') + '">';
+  html += '</div>';
+
+  entry.innerHTML = html;
+  editor.appendChild(entry);
+}
+
+function renderScopeRuleEntry(r) {
+  var rule = r || { param: '', constraint: 'allow', values: [] };
+  var valsStr = (rule.values || []).join(', ');
+  return '<div class="scope-rule-entry">' +
+    '<input class="form-input scope-rule-param" placeholder="Parameter" value="' + esc(rule.param) + '">' +
+    '<select class="form-select scope-rule-constraint">' +
+      '<option value="allow"' + (rule.constraint === 'allow' ? ' selected' : '') + '>allow</option>' +
+      '<option value="block"' + (rule.constraint === 'block' ? ' selected' : '') + '>block</option>' +
+      '<option value="match"' + (rule.constraint === 'match' ? ' selected' : '') + '>match</option>' +
+    '</select>' +
+    '<input class="form-input scope-rule-values" placeholder="Values (comma-separated)" value="' + esc(valsStr) + '">' +
+    '<button class="btn-remove-tool" onclick="this.closest(\'.scope-rule-entry\').remove()" title="Remove rule">&times;</button>' +
+  '</div>';
+}
+
+function addRuleToScope(btn) {
+  var rulesList = btn.previousElementSibling;
+  var div = document.createElement('div');
+  div.innerHTML = renderScopeRuleEntry();
+  rulesList.appendChild(div.firstElementChild);
+}
+
+function openPolicyModal(index) {
+  editingPolicyIdx = typeof index === 'number' ? index : -1;
+  var isEdit = editingPolicyIdx >= 0;
+  var policy = isEdit ? POLICIES[editingPolicyIdx] : null;
+
+  document.getElementById('policy-modal-title').textContent = isEdit ? 'Edit Policy' : 'New Policy';
+  document.getElementById('btn-save-policy').textContent = isEdit ? 'Save Changes' : 'Create Policy';
+
+  document.getElementById('policy-name').value = isEdit ? policy.name : '';
+  document.getElementById('policy-desc').value = isEdit ? (policy.description || '') : '';
+
+  // Reset all field checkboxes and inputs
+  policyFieldIds.forEach(function(fid) {
+    var cb = document.getElementById('pf-' + fid + '-on');
+    var input = document.getElementById('pf-' + fid);
+    if (cb) cb.checked = false;
+    if (input) { input.disabled = true; }
+  });
+
+  // Set defaults
+  document.getElementById('pf-max-iter').value = 5;
+  document.getElementById('pf-timeout').value = 15;
+  document.getElementById('pf-token-budget').value = 10000;
+  document.getElementById('pf-on-timeout').value = 'terminate';
+  document.getElementById('pf-on-budget').value = 'terminate';
+  document.getElementById('pf-require-confirm').value = '';
+
+  if (isEdit && policy) {
+    if (policy.max_iterations !== undefined) {
+      document.getElementById('pf-max-iter-on').checked = true;
+      document.getElementById('pf-max-iter').disabled = false;
+      document.getElementById('pf-max-iter').value = policy.max_iterations;
+    }
+    if (policy.tool_timeout !== undefined) {
+      document.getElementById('pf-timeout-on').checked = true;
+      document.getElementById('pf-timeout').disabled = false;
+      document.getElementById('pf-timeout').value = policy.tool_timeout;
+    }
+    if (policy.token_budget !== undefined) {
+      document.getElementById('pf-token-budget-on').checked = true;
+      document.getElementById('pf-token-budget').disabled = false;
+      document.getElementById('pf-token-budget').value = policy.token_budget;
+    }
+    if (policy.on_timeout !== undefined) {
+      document.getElementById('pf-on-timeout-on').checked = true;
+      document.getElementById('pf-on-timeout').disabled = false;
+      document.getElementById('pf-on-timeout').value = policy.on_timeout;
+    }
+    if (policy.on_budget_exceeded !== undefined) {
+      document.getElementById('pf-on-budget-on').checked = true;
+      document.getElementById('pf-on-budget').disabled = false;
+      document.getElementById('pf-on-budget').value = policy.on_budget_exceeded;
+    }
+    if (policy.require_confirm !== undefined && policy.require_confirm.length) {
+      document.getElementById('pf-require-confirm-on').checked = true;
+      document.getElementById('pf-require-confirm').disabled = false;
+      document.getElementById('pf-require-confirm').value = policy.require_confirm.join(', ');
+    }
+  }
+
+  // Populate tool scopes
+  document.getElementById('policy-scopes-editor').innerHTML = '';
+  if (isEdit && policy && policy.tool_scopes && policy.tool_scopes.length) {
+    policy.tool_scopes.forEach(function(scope) { addScopeEntry(scope); });
+  }
+
+  document.getElementById('policy-modal').classList.add('open');
+}
+
+function closePolicyModal() {
+  document.getElementById('policy-modal').classList.remove('open');
+  editingPolicyIdx = -1;
+}
+
+function savePolicy() {
+  var name = document.getElementById('policy-name').value.trim();
+  var desc = document.getElementById('policy-desc').value.trim();
+  if (!name) { alert('Policy name is required.'); return; }
+
+  var data = { name: name, description: desc };
+
+  if (document.getElementById('pf-max-iter-on').checked) {
+    data.max_iterations = parseInt(document.getElementById('pf-max-iter').value) || 5;
+  }
+  if (document.getElementById('pf-timeout-on').checked) {
+    data.tool_timeout = parseInt(document.getElementById('pf-timeout').value) || 15;
+  }
+  if (document.getElementById('pf-token-budget-on').checked) {
+    data.token_budget = parseInt(document.getElementById('pf-token-budget').value) || 10000;
+  }
+  if (document.getElementById('pf-on-timeout-on').checked) {
+    data.on_timeout = document.getElementById('pf-on-timeout').value;
+  }
+  if (document.getElementById('pf-on-budget-on').checked) {
+    data.on_budget_exceeded = document.getElementById('pf-on-budget').value;
+  }
+  if (document.getElementById('pf-require-confirm-on').checked) {
+    var val = document.getElementById('pf-require-confirm').value;
+    data.require_confirm = val.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+  }
+
+  // Collect tool scopes
+  var scopes = [];
+  document.querySelectorAll('#policy-scopes-editor .scope-entry').forEach(function(entry) {
+    var toolName = entry.querySelector('.scope-tool-name-input').value.trim();
+    if (!toolName) return;
+    var rules = [];
+    entry.querySelectorAll('.scope-rule-entry').forEach(function(re) {
+      var param = re.querySelector('.scope-rule-param').value.trim();
+      if (!param) return;
+      var constraint = re.querySelector('.scope-rule-constraint').value;
+      var valStr = re.querySelector('.scope-rule-values').value;
+      var values = valStr.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+      rules.push({ param: param, constraint: constraint, values: values });
+    });
+    var scopeObj = { tool_name: toolName, rules: rules };
+    var maxCalls = entry.querySelector('.scope-max-calls-input').value;
+    if (maxCalls && parseInt(maxCalls) > 0) {
+      scopeObj.max_calls_per_minute = parseInt(maxCalls);
+    }
+    scopes.push(scopeObj);
+  });
+  if (scopes.length > 0) {
+    data.tool_scopes = scopes;
+  }
+
+  var oldName = editingPolicyIdx >= 0 ? POLICIES[editingPolicyIdx].name : null;
+
+  if (editingPolicyIdx >= 0) {
+    POLICIES[editingPolicyIdx] = data;
+    // Update agent references if policy was renamed
+    if (oldName && oldName !== name) {
+      AGENTS.forEach(function(a) {
+        if (a.assignedPolicies) {
+          var idx = a.assignedPolicies.indexOf(oldName);
+          if (idx >= 0) a.assignedPolicies[idx] = name;
+        }
+      });
+    }
+  } else {
+    POLICIES.push(data);
+  }
+
+  _saveState('policies', POLICIES);
+  _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+  closePolicyModal();
+  renderAll();
+}
+
+function editPolicy(index) { openPolicyModal(index); }
+
+// -- Delete --
+let deleteType = null; // 'agent', 'skill', or 'policy'
+let deletingIndex = -1;
+
+function requestDeleteAgent(index) {
+  deleteType = 'agent';
+  deletingIndex = index;
+  document.getElementById('delete-target-name').textContent = 'agent "' + AGENTS[index].name + '"';
+  document.getElementById('delete-dialog-msg').innerHTML = 'Delete <span class="highlight">' + esc('agent "' + AGENTS[index].name + '"') + '</span>?<br>This cannot be undone.';
+  document.getElementById('delete-modal').classList.add('open');
+}
+
+function requestDeleteSkill(index) {
+  deleteType = 'skill';
+  deletingIndex = index;
+  document.getElementById('delete-target-name').textContent = 'skill "' + SKILLS[index].name + '"';
+  document.getElementById('delete-dialog-msg').innerHTML = 'Delete <span class="highlight">' + esc('skill "' + SKILLS[index].name + '"') + '</span>?<br>This cannot be undone.';
+  document.getElementById('delete-modal').classList.add('open');
+}
+
+function requestDeletePolicy(index) {
+  deleteType = 'policy';
+  deletingIndex = index;
+  var policyName = POLICIES[index].name;
+  var usedBy = AGENTS.filter(function(a) { return a.assignedPolicies && a.assignedPolicies.includes(policyName); });
+  var msg = 'Delete <span class="highlight">' + esc('policy "' + policyName + '"') + '</span>?<br>This cannot be undone.';
+  if (usedBy.length > 0) {
+    msg += '<br><br><span style="color:var(--yellow); font-size:0.82rem;">Warning: This policy is used by ' + usedBy.map(function(a) { return '<strong>' + esc(a.name) + '</strong>'; }).join(', ') + '. It will be removed from their assignments.</span>';
+  }
+  document.getElementById('delete-dialog-msg').innerHTML = msg;
+  document.getElementById('delete-modal').classList.add('open');
+}
+
+function closeDeleteModal() {
+  document.getElementById('delete-modal').classList.remove('open');
+  deleteType = null;
+  deletingIndex = -1;
+}
+
+function confirmDelete() {
+  if (deleteType === 'agent' && deletingIndex >= 0) {
+    const agentName = AGENTS[deletingIndex].name;
+    AGENTS.splice(deletingIndex, 1);
+    if (chatOpenAgent === agentName) {
+      closeChatPanel();
+    }
+  } else if (deleteType === 'skill' && deletingIndex >= 0) {
+    const skillName = SKILLS[deletingIndex].name;
+    SKILLS.splice(deletingIndex, 1);
+    AGENTS.forEach(a => {
+      if (a.assignedSkills) {
+        a.assignedSkills = a.assignedSkills.filter(s => s !== skillName);
+      }
+    });
+  } else if (deleteType === 'policy' && deletingIndex >= 0) {
+    const policyName = POLICIES[deletingIndex].name;
+    POLICIES.splice(deletingIndex, 1);
+    AGENTS.forEach(function(a) {
+      if (a.assignedPolicies) {
+        a.assignedPolicies = a.assignedPolicies.filter(function(p) { return p !== policyName; });
+      }
+    });
+  }
+  _saveState('agents', AGENTS.filter(function(a) { return !a._live; }));
+  _saveState('skills', SKILLS);
+  _saveState('policies', POLICIES);
+  closeDeleteModal();
+  renderAll();
+}
+
+// -- Export --
+function exportAgent(index) {
+  const agent = AGENTS[index];
+  var exportData = JSON.parse(JSON.stringify(agent));
+  exportData.effectivePolicy = getEffectivePolicy(agent);
+  const json = JSON.stringify(exportData, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = agent.name + '.json';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportSkill(index) {
+  const skill = SKILLS[index];
+  const json = JSON.stringify(skill, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = skill.name + '.json';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportPolicy(index) {
+  const policy = POLICIES[index];
+  const json = JSON.stringify(policy, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = policy.name + '.json';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// -- Close modals on overlay click --
+document.getElementById('agent-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeAgentModal(); });
+document.getElementById('skill-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeSkillModal(); });
+document.getElementById('policy-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closePolicyModal(); });
+document.getElementById('delete-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeDeleteModal(); });
+
+// -- Hard-stop toggle --
+let hardStopOn = false;
+document.getElementById('hard-stop-toggle').addEventListener('click', () => {
+  hardStopOn = !hardStopOn;
+  document.getElementById('hard-stop-track').classList.toggle('on', hardStopOn);
+  const lbl = document.getElementById('hard-stop-label');
+  lbl.classList.toggle('on', hardStopOn);
+  lbl.textContent = hardStopOn ? 'Hard stop ON' : 'Hard stop';
+});
+
+// -- Budget form --
+document.getElementById('btn-set-budget').addEventListener('click', () => {
+  const form = document.getElementById('budget-form');
+  const name = form.querySelector('[name="name"]').value.trim();
+  const dollars = parseFloat(form.querySelector('[name="dollars"]').value);
+  const period = form.querySelector('[name="period"]').value;
+  if (!name || isNaN(dollars) || dollars <= 0) return;
+
+  DEMO_COSTS.budgets.push({
+    name, limit_usd: dollars, spent_usd: 0, remaining_usd: dollars,
+    percent_used: 0, period, hard_stop: hardStopOn
+  });
+  form.querySelector('[name="name"]').value = '';
+  form.querySelector('[name="dollars"]').value = '';
+  renderCosts();
+});
+
+// -- Reload --
+document.getElementById('btn-reload').addEventListener('click', renderAll);
+
+// ---------------------------------------------------------------------------
+// Sessions — live from REST API
+// ---------------------------------------------------------------------------
+
+let sessionsData = [];
+
+function getSessionsApiBase() {
+  const el = document.getElementById('sessions-api-url');
+  return (el ? el.value : 'http://localhost:8000').replace(/\/+$/, '');
+}
+
+function getSessionsAuthHeaders() {
+  const key = (document.getElementById('sessions-api-key') || {}).value;
+  if (!key) return {};
+  return { 'Authorization': 'Bearer ' + key };
+}
+
+// ---------------------------------------------------------------------------
+// Trigger mode
+// ---------------------------------------------------------------------------
+
+var triggerMode = 'ondemand';
+
+function setTriggerMode(mode) {
+  triggerMode = mode;
+  var modes = ['ondemand', 'interval', 'cron', 'webhook', 'dbwatch'];
+  modes.forEach(function(m) {
+    var opts = document.getElementById('trigger-' + m + '-opts');
+    var btn = document.getElementById('btn-trigger-' + m);
+    if (opts) opts.style.display = m === mode ? 'block' : 'none';
+    if (btn) {
+      btn.style.background = m === mode ? 'var(--accent)' : '';
+      btn.style.color = m === mode ? '#fff' : '';
+    }
+  });
+}
+
+// Initialize
+setTriggerMode('ondemand');
+
+// Populate policy checkboxes in creation form
+function renderPolicyCheckboxes() {
+  var container = document.getElementById('new-session-policies');
+  if (!container) return;
+  container.innerHTML = POLICIES.map(function(p) {
+    var summary = policyFieldSummary(p);
+    return '<label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem; cursor:pointer; background:var(--bg); padding:0.2rem 0.5rem; border-radius:4px; border:1px solid var(--border);">' +
+      '<input type="checkbox" class="new-session-policy-cb" value="' + esc(p.name) + '"> ' +
+      '<span style="color:var(--orange); font-weight:500;">' + esc(p.name) + '</span>' +
+      (summary ? ' <span style="color:var(--muted); font-size:0.68rem;">' + esc(summary) + '</span>' : '') +
+      '</label>';
+  }).join('');
+}
+renderPolicyCheckboxes();
+
+// ---------------------------------------------------------------------------
+// Pipeline editor
+// ---------------------------------------------------------------------------
+
+var pipelineMode = null;
+
+function togglePipelineMode(mode) {
+  var describeDiv = document.getElementById('pipeline-describe-mode');
+  var editDiv = document.getElementById('pipeline-edit-mode');
+  var toolsDiv = document.getElementById('pipeline-tools-list');
+  var btnDescribe = document.getElementById('btn-pipeline-describe');
+  var btnEdit = document.getElementById('btn-pipeline-edit');
+
+  if (pipelineMode === mode) {
+    // Toggle off
+    pipelineMode = null;
+    describeDiv.style.display = 'none';
+    editDiv.style.display = 'none';
+    toolsDiv.style.display = 'none';
+    btnDescribe.style.background = '';
+    btnEdit.style.background = '';
+    return;
+  }
+
+  pipelineMode = mode;
+  describeDiv.style.display = mode === 'describe' ? 'block' : 'none';
+  editDiv.style.display = mode === 'edit' ? 'block' : 'none';
+  btnDescribe.style.background = mode === 'describe' ? 'var(--accent)' : '';
+  btnDescribe.style.color = mode === 'describe' ? '#fff' : '';
+  btnEdit.style.background = mode === 'edit' ? 'var(--accent)' : '';
+  btnEdit.style.color = mode === 'edit' ? '#fff' : '';
+
+  // Load available tools
+  loadPipelineTools();
+}
+
+function loadPipelineTools() {
+  var base = getSessionsApiBase();
+  var headers = getSessionsAuthHeaders();
+  var toolsDiv = document.getElementById('pipeline-tools-list');
+  var tagsDiv = document.getElementById('pipeline-tools-tags');
+
+  fetch(base + '/pipelines/tools', { headers: headers })
+    .then(function(r) { return r.ok ? r.json() : []; })
+    .then(function(tools) {
+      if (tools.length === 0) {
+        toolsDiv.style.display = 'none';
+        return;
+      }
+      toolsDiv.style.display = 'block';
+      tagsDiv.innerHTML = tools.map(function(t) {
+        var tip = t.description ? ' title="' + esc(t.description) + '"' : '';
+        return '<span class="tag"' + tip + '>' + esc(t.name) + '</span>';
+      }).join('');
+    })
+    .catch(function() { toolsDiv.style.display = 'none'; });
+
+  // Also fetch schema
+  var schemaDiv = document.getElementById('pipeline-schema');
+  var schemaContent = document.getElementById('pipeline-schema-content');
+  fetch(base + '/pipelines/schema', { headers: headers })
+    .then(function(r) { return r.ok ? r.json() : {}; })
+    .then(function(schemas) {
+      var text = '';
+      Object.keys(schemas).forEach(function(connName) {
+        var s = schemas[connName];
+        if (s.tables) {
+          s.tables.forEach(function(t) {
+            text += 'Table: ' + t.name;
+            if (t.row_count !== undefined) text += ' (' + t.row_count + ' rows)';
+            text += '\n';
+            (t.columns || []).forEach(function(c) {
+              text += '  - ' + c.name + ' ' + (c.type || '');
+              if (c.pk) text += ' (PK)';
+              text += '\n';
+            });
+            text += '\n';
+          });
+        }
+        if (s.collections) {
+          s.collections.forEach(function(c) {
+            text += 'Collection: ' + c.name + ' (' + c.document_count + ' docs)\n';
+            (c.fields || []).forEach(function(f) {
+              text += '  - ' + f.name + ' (' + f.type + ')\n';
+            });
+            text += '\n';
+          });
+        }
+      });
+      if (text) {
+        schemaContent.textContent = text;
+        schemaDiv.style.display = 'block';
+      }
+    })
+    .catch(function() {});
+}
+
+function generatePipelinePoml() {
+  var base = getSessionsApiBase();
+  var headers = Object.assign({'Content-Type': 'application/json'}, getSessionsAuthHeaders());
+  var desc = document.getElementById('pipeline-description').value.trim();
+  if (!desc) { alert('Enter a description first'); return; }
+
+  var statusEl = document.getElementById('pipeline-generate-status');
+  var btn = document.getElementById('btn-generate-poml');
+  statusEl.textContent = 'Generating...';
+  btn.disabled = true;
+
+  fetch(base + '/pipelines/generate', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ description: desc })
+  })
+    .then(function(r) {
+      if (r.status === 501) throw new Error('No LLM configured on server');
+      if (!r.ok) throw new Error('Error ' + r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      document.getElementById('pipeline-poml-editor').value = data.poml;
+      statusEl.textContent = 'Generated! Switch to Edit POML to review.';
+      statusEl.style.color = 'var(--green)';
+      // Auto-switch to edit mode
+      togglePipelineMode('edit');
+      validatePipelinePoml();
+    })
+    .catch(function(err) {
+      statusEl.textContent = 'Failed: ' + err.message;
+      statusEl.style.color = 'var(--red)';
+    })
+    .finally(function() { btn.disabled = false; });
+}
+
+function validatePipelinePoml() {
+  var base = getSessionsApiBase();
+  var headers = Object.assign({'Content-Type': 'application/json'}, getSessionsAuthHeaders());
+  var poml = document.getElementById('pipeline-poml-editor').value.trim();
+  if (!poml) return;
+
+  var agentId = document.getElementById('new-session-agent-id').value.trim() || 'preview';
+  var statusEl = document.getElementById('pipeline-validate-status');
+  var previewDiv = document.getElementById('pipeline-preview');
+  var stepsDiv = document.getElementById('pipeline-preview-steps');
+
+  fetch(base + '/pipelines/validate', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ poml: poml, agent_id: agentId })
+  })
+    .then(function(r) {
+      if (!r.ok) return r.json().then(function(d) { throw new Error(d.detail || r.status); });
+      return r.json();
+    })
+    .then(function(data) {
+      statusEl.textContent = 'Valid (' + data.steps.length + ' steps)';
+      statusEl.style.color = 'var(--green)';
+      previewDiv.style.display = 'block';
+      stepsDiv.innerHTML = data.steps.map(function(s, i) {
+        var icon = s.type === 'condition' ? '&#9670;' : '&#9654;';
+        var toolLabel = s.tool ? ' <span style="color:var(--accent)">' + esc(s.tool) + '</span>' : '';
+        return '<div style="font-size:0.75rem; margin-bottom:0.15rem;">' +
+          '<span style="color:var(--muted)">' + (i + 1) + '.</span> ' +
+          icon + ' ' + esc(s.name) + toolLabel + '</div>';
+      }).join('');
+    })
+    .catch(function(err) {
+      statusEl.textContent = 'Invalid: ' + err.message;
+      statusEl.style.color = 'var(--red)';
+      previewDiv.style.display = 'none';
+    });
+}
+
+function getSessionPoml() {
+  if (pipelineMode === 'edit' || pipelineMode === 'describe') {
+    return (document.getElementById('pipeline-poml-editor').value || '').trim();
+  }
+  return '';
+}
+
+function runPipelineNow() {
+  var base = getSessionsApiBase();
+  var headers = Object.assign({'Content-Type': 'application/json'}, getSessionsAuthHeaders());
+  var agentId = document.getElementById('new-session-agent-id').value.trim();
+  if (!agentId) { alert('Agent ID is required'); return; }
+  var poml = getSessionPoml();
+  if (!poml) { alert('Write or generate a pipeline first'); return; }
+  var maxIter = parseInt(document.getElementById('new-session-max-iter').value) || 10;
+  var timeout = parseInt(document.getElementById('new-session-timeout').value) || 30;
+  var budgetVal = document.getElementById('new-session-budget').value.trim();
+  var stateless = document.getElementById('new-session-stateless').checked;
+  var policy = { max_iterations: maxIter, tool_timeout: timeout };
+  if (budgetVal) policy.token_budget = parseInt(budgetVal);
+
+  fetch(base + '/pipelines/run', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({
+      agent_id: agentId, poml: poml, policy: policy, stateless: stateless
+    })
+  })
+    .then(function(r) {
+      if (!r.ok) return r.json().then(function(d) { throw new Error(d.detail || r.status); });
+      return r.json();
+    })
+    .then(function(data) {
+      var msg = data.completed ? 'Pipeline completed!' : 'Pipeline stopped: ' + (data.error || 'unknown');
+      msg += '\nSteps: ' + data.steps.length + ', Duration: ' + data.total_duration_ms + 'ms';
+      if (data.final_output) msg += '\nOutput: ' + data.final_output.substring(0, 200);
+      alert(msg);
+      document.getElementById('create-session-form').style.display = 'none';
+      fetchSessions();
+    })
+    .catch(function(err) { alert('Pipeline failed: ' + err.message); });
+}
+
+function getSessionPolicy() {
+  var maxIter = parseInt(document.getElementById('new-session-max-iter').value) || 10;
+  var timeout = parseInt(document.getElementById('new-session-timeout').value) || 30;
+  var budgetVal = document.getElementById('new-session-budget').value.trim();
+  var policy = { max_iterations: maxIter, tool_timeout: timeout };
+  if (budgetVal) policy.token_budget = parseInt(budgetVal);
+
+  // Merge selected policies
+  var checkboxes = document.querySelectorAll('.new-session-policy-cb:checked');
+  var confirmTools = [];
+  checkboxes.forEach(function(cb) {
+    var p = POLICIES.find(function(pol) { return pol.name === cb.value; });
+    if (!p) return;
+    if (p.max_iterations !== undefined) policy.max_iterations = p.max_iterations;
+    if (p.tool_timeout !== undefined) policy.tool_timeout = p.tool_timeout;
+    if (p.token_budget !== undefined) policy.token_budget = p.token_budget;
+    if (p.require_confirm) confirmTools = confirmTools.concat(p.require_confirm);
+  });
+  if (confirmTools.length) policy.require_confirm = Array.from(new Set(confirmTools));
+  return policy;
+}
+
+function buildTriggerPayload(agentId, policy) {
+  var trigger = { name: agentId + '-trigger', trigger_type: triggerMode };
+  trigger.agent_id = agentId;
+  trigger.policy = policy;
+  var poml = getSessionPoml();
+  if (poml) trigger.poml = poml;
+
+  if (triggerMode === 'interval') {
+    var val = parseInt(document.getElementById('trigger-interval-value').value) || 15;
+    var unit = document.getElementById('trigger-interval-unit').value;
+    if (unit === 'minutes') trigger.minutes = val;
+    else if (unit === 'hours') trigger.hours = val;
+    else trigger.seconds = val;
+  } else if (triggerMode === 'cron') {
+    trigger.cron = document.getElementById('trigger-cron-expr').value.trim();
+  } else if (triggerMode === 'dbwatch') {
+    trigger.trigger_type = 'db_watch';
+    trigger.query = document.getElementById('trigger-dbwatch-query').value.trim();
+    trigger.operator = document.getElementById('trigger-dbwatch-op').value;
+    trigger.threshold = parseFloat(document.getElementById('trigger-dbwatch-threshold').value) || 0;
+    trigger.poll_seconds = parseInt(document.getElementById('trigger-dbwatch-poll').value) || 60;
+  }
+  return trigger;
+}
+
+function submitCreateSession() {
+  var base = getSessionsApiBase();
+  var headers = Object.assign({'Content-Type': 'application/json'}, getSessionsAuthHeaders());
+  var agentId = document.getElementById('new-session-agent-id').value.trim();
+  if (!agentId) { alert('Agent ID is required'); return; }
+  var stateless = document.getElementById('new-session-stateless').checked;
+  var policy = getSessionPolicy();
+
+  // Create the session
+  fetch(base + '/sessions', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ agent_id: agentId, policy: policy, stateless: stateless })
+  })
+    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(data) {
+      // If a trigger mode other than on-demand is selected, register it
+      if (triggerMode !== 'ondemand') {
+        var triggerPayload = buildTriggerPayload(agentId, policy);
+        return fetch(base + '/triggers', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(triggerPayload)
+        }).then(function(r) {
+          if (!r.ok) return r.json().then(function(d) { console.warn('Trigger registration failed:', d.detail); });
+          return r.json();
+        }).then(function() { return data; });
+      }
+      return data;
+    })
+    .then(function(data) {
+      document.getElementById('create-session-form').style.display = 'none';
+      fetchSessions();
+    })
+    .catch(function(err) { alert('Failed to create session: ' + err.message); });
+}
+
+let liveWebSockets = {};
+
+function fetchSessions() {
+  const base = getSessionsApiBase();
+  const headers = getSessionsAuthHeaders();
+  const statusEl = document.getElementById('sessions-status');
+  statusEl.textContent = 'Loading...';
+  fetch(base + '/sessions', { headers: headers })
+    .then(r => { if (r.status === 401) throw new Error('401 Unauthorized — check your API key'); if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      sessionsData = data;
+      statusEl.textContent = data.length + ' session(s) loaded';
+      renderSessions();
+      connectLiveUpdates();
+    })
+    .catch(err => {
+      statusEl.textContent = 'Could not reach API: ' + err.message;
+      document.getElementById('sessions-grid').innerHTML =
+        '<div class="card"><div class="card-desc">Start the server with <code>uvicorn agenthandler.server:app</code></div></div>';
+    });
+}
+
+function connectLiveUpdates() {
+  // Close stale connections
+  Object.keys(liveWebSockets).forEach(function(sid) {
+    if (!sessionsData.find(function(s) { return s.session_id === sid && s.status === 'running'; })) {
+      if (liveWebSockets[sid]) { liveWebSockets[sid].close(); delete liveWebSockets[sid]; }
+    }
+  });
+  // Open WebSocket for each running session
+  var base = getSessionsApiBase().replace(/^http/, 'ws');
+  var key = (document.getElementById('sessions-api-key') || {}).value || '';
+  sessionsData.forEach(function(s) {
+    if (s.status !== 'running' && s.status !== 'paused') return;
+    if (liveWebSockets[s.session_id]) return; // already connected
+    var url = base + '/sessions/' + s.session_id + '/events';
+    if (key) url += '?token=' + encodeURIComponent(key);
+    try {
+      var ws = new WebSocket(url);
+      ws.onmessage = function(evt) {
+        var msg = JSON.parse(evt.data);
+        if (msg.type === 'status') {
+          // Update session data in place
+          var idx = sessionsData.findIndex(function(x) { return x.session_id === msg.data.session_id; });
+          if (idx >= 0) {
+            sessionsData[idx].status = msg.data.status;
+            sessionsData[idx].iterations = msg.data.iterations;
+            sessionsData[idx].tokens_used = msg.data.tokens_used;
+            renderSessions();
+          }
+        } else if (msg.type === 'approval_required') {
+          // Flash the status bar
+          var statusEl = document.getElementById('sessions-status');
+          statusEl.textContent = 'Approval needed: ' + msg.data.tool_name + ' (session ' + msg.data.session_id.slice(0,8) + '...)';
+          statusEl.style.color = 'var(--yellow)';
+          setTimeout(function() { statusEl.style.color = ''; }, 5000);
+        }
+      };
+      ws.onclose = function() { delete liveWebSockets[s.session_id]; };
+      ws.onerror = function() { ws.close(); };
+      liveWebSockets[s.session_id] = ws;
+    } catch(e) { /* WebSocket not available */ }
+  });
+}
+
+function sessionStatusBadgeClass(status) {
+  if (status === 'running') return 'badge-status-running';
+  if (status === 'paused') return 'badge-status-paused';
+  return 'badge-status-stopped';
+}
+
+function sessionStatusDot(status) {
+  if (status === 'running') return 'dot-green';
+  if (status === 'paused') return 'dot-yellow';
+  return 'dot-gray';
+}
+
+function renderSessions() {
+  const grid = document.getElementById('sessions-grid');
+  if (!sessionsData.length) {
+    grid.innerHTML = '<div class="card"><div class="card-desc">No sessions. Create one via POST /sessions.</div></div>';
+    return;
+  }
+  grid.innerHTML = sessionsData.map((s, i) => {
+    let html = '<div class="card" style="cursor:pointer" onclick="showSessionDetail(\'' + esc(s.session_id) + '\')">';
+    html += '<div class="card-header">';
+    html += '<div class="card-header-left">';
+    html += '<span class="dot ' + sessionStatusDot(s.status) + '"></span>';
+    html += '<span class="card-title">' + esc(s.agent_id) + '</span>';
+    html += '</div>';
+    html += '<div class="card-header-right">';
+    html += '<span class="badge ' + sessionStatusBadgeClass(s.status) + '">' + esc(s.status) + '</span>';
+    if (s.stateless) html += ' <span class="badge badge-yellow">stateless</span>';
+    html += '</div></div>';
+    html += '<div class="card-desc" style="font-size:0.75rem; color:var(--muted);">Session: ' + esc(s.session_id) + '</div>';
+    html += '<div class="detail-row"><span class="detail-label">Iterations</span><span class="detail-value">' + s.iterations + ' / ' + s.iteration_limit + '</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">' + s.tokens_used + (s.token_limit ? ' / ' + s.token_limit : '') + '</span></div>';
+    if (s.resume_count > 0) {
+      html += '<div class="detail-row"><span class="detail-label">Resumes</span><span class="detail-value">' + s.resume_count + '</span></div>';
+    }
+    if (s.failure_reason) {
+      html += '<div style="font-size:0.75rem; color:var(--red); margin:0.3rem 0; padding:0.3rem 0.5rem; background:rgba(250,82,82,0.1); border-radius:4px;">' + esc(s.failure_reason) + '</div>';
+    }
+    // Controls
+    html += '<div class="card-actions">';
+    if (s.status === 'running') {
+      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'pause\')">Pause</button>';
+      html += '<button class="btn-danger" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'stop\')">Stop</button>';
+    } else if (s.status === 'paused') {
+      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'resume\')">Resume</button>';
+      html += '<button class="btn-danger" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'stop\')">Stop</button>';
+    } else if (s.status === 'stopped' || s.status === 'failed') {
+      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionRestart(\'' + s.session_id + '\')">Restart</button>';
+    }
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }).join('');
+}
+
+function sessionAction(sessionId, action) {
+  const base = getSessionsApiBase();
+  const headers = getSessionsAuthHeaders();
+  fetch(base + '/sessions/' + sessionId + '/' + action, { method: 'POST', headers: headers })
+    .then(r => { if (r.status === 401) throw new Error('401 Unauthorized — check your API key'); if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(() => fetchSessions())
+    .catch(err => alert('Action failed: ' + err.message));
+}
+
+function approvalAction(sessionId, approvalId, action) {
+  const base = getSessionsApiBase();
+  const headers = Object.assign({'Content-Type': 'application/json'}, getSessionsAuthHeaders());
+  let body = '{}';
+  if (action === 'deny') {
+    const reason = prompt('Deny reason (optional):') || '';
+    body = JSON.stringify({ reason: reason });
+  }
+  fetch(base + '/sessions/' + sessionId + '/approvals/' + approvalId + '/' + action, {
+    method: 'POST', headers: headers, body: body
+  })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(() => { showSessionDetail(sessionId); fetchSessions(); })
+    .catch(err => alert('Action failed: ' + err.message));
+}
+
+function sessionRestart(sessionId) {
+  const base = getSessionsApiBase();
+  const headers = getSessionsAuthHeaders();
+  fetch(base + '/sessions/' + sessionId + '/restart', { method: 'POST', headers: headers })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      alert('New session created: ' + data.session_id);
+      fetchSessions();
+    })
+    .catch(err => alert('Restart failed: ' + err.message));
+}
+
+function showSessionDetail(sessionId) {
+  const base = getSessionsApiBase();
+  const detailDiv = document.getElementById('session-detail');
+  const card = document.getElementById('session-detail-card');
+
+  const headers = getSessionsAuthHeaders();
+  Promise.all([
+    fetch(base + '/sessions/' + sessionId, { headers: headers }).then(r => r.json()),
+    fetch(base + '/sessions/' + sessionId + '/audit', { headers: headers }).then(r => r.json()),
+    fetch(base + '/sessions/' + sessionId + '/approvals', { headers: headers }).then(r => r.json()).catch(() => [])
+  ]).then(([detail, audit, approvals]) => {
+    let html = '<div class="card-header">';
+    html += '<div class="card-header-left"><span class="dot ' + sessionStatusDot(detail.status) + '"></span>';
+    html += '<span class="card-title">' + esc(detail.agent_id) + '</span></div>';
+    html += '<div class="card-header-right"><span class="badge ' + sessionStatusBadgeClass(detail.status) + '">' + esc(detail.status) + '</span></div></div>';
+    html += '<div class="card-desc" style="font-size:0.75rem; color:var(--muted); margin-bottom:0.5rem;">Session: ' + esc(detail.session_id) + '</div>';
+
+    // Pending approvals
+    var pendingApprovals = approvals.filter(function(a) { return a.status === 'pending'; });
+    if (pendingApprovals.length) {
+      html += '<h4 style="font-size:0.85rem; margin:0.5rem 0 0.3rem; color:var(--yellow);">Pending Approvals (' + pendingApprovals.length + ')</h4>';
+      pendingApprovals.forEach(function(a) {
+        html += '<div class="card" style="margin-bottom:0.4rem; border-color:var(--yellow); padding:0.6rem;">';
+        html += '<div style="font-size:0.85rem; font-weight:600;">Tool: <span style="color:var(--accent);">' + esc(a.tool_name) + '</span></div>';
+        html += '<div style="font-size:0.75rem; color:var(--muted); margin:0.2rem 0;">Args: ' + esc(JSON.stringify(a.tool_args)) + '</div>';
+        html += '<div style="font-size:0.72rem; color:var(--muted);">Requested: ' + esc(a.created_at) + '</div>';
+        html += '<div class="card-actions" style="margin-top:0.3rem;">';
+        html += '<button class="btn-secondary" style="background:var(--green); color:#fff; border-color:var(--green);" onclick="approvalAction(\'' + esc(detail.session_id) + '\',\'' + esc(a.approval_id) + '\',\'approve\')">Approve</button>';
+        html += '<button class="btn-danger" onclick="approvalAction(\'' + esc(detail.session_id) + '\',\'' + esc(a.approval_id) + '\',\'deny\')">Deny</button>';
+        html += '</div></div>';
+      });
+    }
+
+    // Past approvals
+    var resolvedApprovals = approvals.filter(function(a) { return a.status !== 'pending'; });
+    if (resolvedApprovals.length) {
+      html += '<h4 style="font-size:0.85rem; margin:0.5rem 0 0.3rem;">Approval History</h4>';
+      resolvedApprovals.forEach(function(a) {
+        var color = a.status === 'approved' ? 'var(--green)' : 'var(--red)';
+        html += '<div style="font-size:0.75rem; margin-bottom:0.2rem;">';
+        html += '<span style="color:' + color + ';">' + esc(a.status) + '</span> ';
+        html += '<span style="color:var(--accent);">' + esc(a.tool_name) + '</span>';
+        if (a.deny_reason) html += ' &mdash; ' + esc(a.deny_reason);
+        html += '</div>';
+      });
+    }
+
+    // Budget usage
+    html += '<h4 style="font-size:0.85rem; margin:0.5rem 0 0.3rem;">Budget</h4>';
+    html += '<div class="detail-row"><span class="detail-label">Iterations</span><span class="detail-value">' + detail.iterations + ' / ' + detail.iteration_limit + '</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">' + detail.tokens_used + (detail.token_limit ? ' / ' + detail.token_limit : '') + '</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Last checkpoint</span><span class="detail-value">' + esc(detail.timestamp || 'N/A') + '</span></div>';
+
+    // Audit entries
+    if (audit.length) {
+      html += '<h4 style="font-size:0.85rem; margin:0.5rem 0 0.3rem;">Recent Audit (' + audit.length + ' entries)</h4>';
+      html += '<div style="max-height:300px; overflow-y:auto; font-size:0.75rem; font-family:monospace; background:var(--bg); border-radius:6px; padding:0.5rem;">';
+      audit.slice(-20).reverse().forEach(e => {
+        const color = e.outcome === 'denied' || e.outcome === 'failed' ? 'var(--red)' :
+                      e.outcome === 'timed_out' || e.outcome === 'budget_exceeded' ? 'var(--yellow)' :
+                      'var(--muted)';
+        html += '<div style="margin-bottom:0.25rem; color:' + color + ';">';
+        html += '<span style="color:var(--muted)">' + esc((e.timestamp || '').slice(11, 19)) + '</span> ';
+        html += '<span style="color:var(--accent)">' + esc(e.phase) + '</span> ';
+        html += '<span>' + esc(e.outcome) + '</span>';
+        if (e.target) html += ' <span style="color:var(--green)">' + esc(e.target) + '</span>';
+        if (e.detail) html += ' &mdash; ' + esc(e.detail);
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    html += '<div class="card-actions" style="margin-top:0.5rem;">';
+    html += '<button class="btn-secondary" onclick="document.getElementById(\'session-detail\').style.display=\'none\'">Close</button>';
+    html += '</div>';
+
+    card.innerHTML = html;
+    detailDiv.style.display = 'block';
+  }).catch(err => {
+    card.innerHTML = '<div class="card-desc">Failed to load detail: ' + esc(err.message) + '</div>';
+    detailDiv.style.display = 'block';
+  });
+}
+
+function renderAll() {
+  renderOverview();
+  renderAgents();
+  renderSkills();
+  renderCosts();
+  renderPolicies();
+}
+
+renderAll();
+
+// ---------------------------------------------------------------------------
+// Routing tab
+// ---------------------------------------------------------------------------
+
+let routingRules = [
+  { name: 'default', match: {}, route: 'cloud', model: 'claude-haiku-4-5', escalation: '' }
+];
+
+function renderRoutingRules() {
+  const container = document.getElementById('routing-rules-list');
+  if (!container) return;
+  container.innerHTML = routingRules.map((rule, i) => `
+    <div class="card" style="margin-bottom:0.5rem; cursor:grab;" draggable="true"
+         ondragstart="rtDragStart(event,${i})" ondragover="rtDragOver(event)" ondrop="rtDrop(event,${i})">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
+        <div style="display:flex; align-items:center; gap:0.5rem;">
+          <span style="font-size:0.75rem; color:var(--muted);">#${i+1}</span>
+          <input class="form-input" value="${rule.name}" onchange="routingRules[${i}].name=this.value"
+                 style="width:180px; font-size:0.82rem; font-weight:600;">
+          <span class="badge ${rule.route==='cloud'?'badge-blue':rule.route==='local'?'badge-green':'badge-yellow'}"
+                style="font-size:0.72rem; padding:0.15rem 0.5rem; border-radius:4px;">
+            ${rule.route.toUpperCase()}
+          </span>
+        </div>
+        <div style="display:flex; gap:0.35rem;">
+          ${i > 0 ? `<button class="btn-secondary" style="font-size:0.72rem; padding:0.15rem 0.4rem;" onclick="moveRule(${i},-1)">&#9650;</button>` : ''}
+          ${i < routingRules.length-1 ? `<button class="btn-secondary" style="font-size:0.72rem; padding:0.15rem 0.4rem;" onclick="moveRule(${i},1)">&#9660;</button>` : ''}
+          <button class="btn-secondary" style="font-size:0.72rem; padding:0.15rem 0.4rem; color:var(--red);" onclick="removeRule(${i})">&#10005;</button>
+        </div>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0.5rem;">
+        <label style="font-size:0.75rem; color:var(--muted);">
+          Route
+          <select class="form-input" style="width:100%; margin-top:0.15rem;" onchange="routingRules[${i}].route=this.value; renderRoutingRules();">
+            <option value="cloud" ${rule.route==='cloud'?'selected':''}>Cloud</option>
+            <option value="local" ${rule.route==='local'?'selected':''}>Local (Ollama)</option>
+            <option value="workflow" ${rule.route==='workflow'?'selected':''}>Workflow</option>
+          </select>
+        </label>
+        <label style="font-size:0.75rem; color:var(--muted);">
+          Model
+          <select class="form-input" style="width:100%; margin-top:0.15rem;" onchange="routingRules[${i}].model=this.value;">
+            <optgroup label="Anthropic">
+              <option value="claude-haiku-4-5" ${rule.model==='claude-haiku-4-5'?'selected':''}>Haiku 4.5 ($0.25/M)</option>
+              <option value="claude-sonnet-4-6" ${rule.model==='claude-sonnet-4-6'||!rule.model?'selected':''}>Sonnet 4.6 ($3/M)</option>
+              <option value="claude-opus-4-6" ${rule.model==='claude-opus-4-6'?'selected':''}>Opus 4.6 ($15/M)</option>
+            </optgroup>
+            <optgroup label="OpenAI">
+              <option value="gpt-4o-mini" ${rule.model==='gpt-4o-mini'?'selected':''}>GPT-4o Mini ($0.15/M)</option>
+              <option value="gpt-4o" ${rule.model==='gpt-4o'?'selected':''}>GPT-4o ($2.50/M)</option>
+            </optgroup>
+            <optgroup label="Google">
+              <option value="gemini-1.5-flash" ${rule.model==='gemini-1.5-flash'?'selected':''}>Gemini Flash ($0.08/M)</option>
+              <option value="gemini-1.5-pro" ${rule.model==='gemini-1.5-pro'?'selected':''}>Gemini Pro ($1.25/M)</option>
+            </optgroup>
+          </select>
+        </label>
+        <label style="font-size:0.75rem; color:var(--muted);">
+          Escalation
+          <select class="form-input" style="width:100%; margin-top:0.15rem;" onchange="routingRules[${i}].escalation=this.value;">
+            <option value="" ${!rule.escalation?'selected':''}>Default</option>
+            <option value="allowed" ${rule.escalation==='allowed'?'selected':''}>Allowed (bump model)</option>
+            <option value="forbidden" ${rule.escalation==='forbidden'?'selected':''}>Forbidden</option>
+          </select>
+        </label>
+        <label style="font-size:0.75rem; color:var(--muted);">
+          Keywords (comma-sep)
+          <input class="form-input" style="width:100%; margin-top:0.15rem;"
+                 value="${(rule.match.keywords_any||[]).join(', ')}"
+                 onchange="routingRules[${i}].match.keywords_any=this.value.split(',').map(s=>s.trim()).filter(Boolean);">
+        </label>
+      </div>
+      ${rule.route === 'workflow' ? `
+      <label style="font-size:0.75rem; color:var(--muted); margin-top:0.5rem; display:block;">
+        Workflow Name
+        <input class="form-input" style="width:200px; margin-top:0.15rem;"
+               value="${rule.workflow||''}" onchange="routingRules[${i}].workflow=this.value;">
+      </label>` : ''}
+    </div>
+  `).join('');
+}
+
+function addRoutingRule() {
+  const n = routingRules.length;
+  routingRules.splice(n > 0 ? n - 1 : 0, 0, {
+    name: 'new-rule', match: { keywords_any: [] }, route: 'cloud', model: 'claude-sonnet-4-6', escalation: 'allowed'
+  });
+  renderRoutingRules();
+}
+
+function removeRule(i) {
+  if (routingRules.length <= 1) return;
+  routingRules.splice(i, 1);
+  renderRoutingRules();
+}
+
+function moveRule(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= routingRules.length) return;
+  [routingRules[i], routingRules[j]] = [routingRules[j], routingRules[i]];
+  renderRoutingRules();
+}
+
+let rtDragIdx = -1;
+function rtDragStart(e, i) { rtDragIdx = i; e.dataTransfer.effectAllowed = 'move'; }
+function rtDragOver(e) { e.preventDefault(); }
+function rtDrop(e, i) {
+  e.preventDefault();
+  if (rtDragIdx < 0 || rtDragIdx === i) return;
+  const item = routingRules.splice(rtDragIdx, 1)[0];
+  routingRules.splice(i, 0, item);
+  rtDragIdx = -1;
+  renderRoutingRules();
+}
+
+function buildRoutingYaml() {
+  const lines = [];
+  lines.push('version: 1');
+  lines.push('revision: 1');
+  lines.push(`local_model: "${document.getElementById('rt-local-model').value}"`);
+  lines.push('');
+  lines.push('rules:');
+  for (const rule of routingRules) {
+    lines.push(`- name: ${rule.name}`);
+    const kw = rule.match.keywords_any || [];
+    if (kw.length > 0) {
+      lines.push('  match:');
+      lines.push(`    keywords_any: [${kw.map(k => `"${k}"`).join(', ')}]`);
+    } else {
+      lines.push('  match: {}');
+    }
+    lines.push(`  route: ${rule.route}`);
+    if (rule.model) lines.push(`  model: "${rule.model}"`);
+    if (rule.escalation) lines.push(`  escalation: ${rule.escalation}`);
+    if (rule.workflow) lines.push(`  workflow: ${rule.workflow}`);
+    lines.push('');
+  }
+  lines.push('escalation:');
+  lines.push('  method: self_score');
+  lines.push(`  threshold: ${document.getElementById('rt-esc-threshold').value}`);
+  lines.push(`  max_escalations_per_hour: ${document.getElementById('rt-esc-max').value}`);
+  lines.push('');
+  lines.push('budget:');
+  lines.push(`  max_cloud_tokens: ${document.getElementById('rt-max-tokens').value}`);
+  lines.push('');
+  lines.push('cloud:');
+  lines.push(`  model: "${document.getElementById('rt-cloud-model').value}"`);
+  lines.push('');
+  lines.push('local:');
+  lines.push(`  base_url: "${document.getElementById('rt-local-url').value}"`);
+  lines.push(`  model: "${document.getElementById('rt-local-model').value}"`);
+  const compression = document.getElementById('rt-compression').value;
+  if (compression !== 'off') {
+    lines.push('');
+    lines.push('compression:');
+    lines.push(`  mode: "${compression}"`);
+    lines.push(`  min_tokens: ${document.getElementById('rt-min-compress').value}`);
+  }
+  return lines.join('\n');
+}
+
+function exportRoutingYaml() {
+  const panel = document.getElementById('routing-yaml-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('rt-yaml-output').textContent = buildRoutingYaml();
+}
+
+function copyRoutingYaml() {
+  navigator.clipboard.writeText(document.getElementById('rt-yaml-output').textContent);
+  const btn = event.target;
+  btn.textContent = 'Copied!';
+  setTimeout(() => btn.textContent = 'Copy to Clipboard', 1500);
+}
+
+function testRoutingQuery() {
+  const panel = document.getElementById('routing-test-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function runRoutingTest() {
+  const query = document.getElementById('rt-test-input').value.toLowerCase();
+  const resultEl = document.getElementById('rt-test-result');
+  if (!query) { resultEl.textContent = 'Enter a query above.'; return; }
+
+  let matched = null;
+  for (const rule of routingRules) {
+    const kw = rule.match.keywords_any || [];
+    if (kw.length === 0) { matched = rule; break; }
+    if (kw.some(k => query.includes(k.toLowerCase()))) { matched = rule; break; }
+  }
+
+  if (matched) {
+    const color = matched.route === 'cloud' ? 'var(--accent)' : matched.route === 'local' ? 'var(--green)' : 'var(--yellow)';
+    resultEl.innerHTML = `<span style="color:${color}; font-weight:600;">${matched.route.toUpperCase()}</span> &rarr; <strong>${matched.model || 'default'}</strong> &mdash; rule "<strong>${matched.name}</strong>"` +
+      (matched.escalation ? ` (escalation: ${matched.escalation})` : '');
+  } else {
+    resultEl.innerHTML = '<span style="color:var(--red);">No rule matched</span> &mdash; query would be rejected.';
+  }
+}
+
+renderRoutingRules();
+</script>
+</body>
+</html>

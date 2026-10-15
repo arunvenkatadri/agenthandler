@@ -1,0 +1,1083 @@
+"""Supervisor — the core of agenthandler.
+
+Wraps tool calls with timeout, budget, circuit breaker, and audit.
+Doesn't own the agent loop — supervises whatever loop you're running.
+
+Usage:
+    supervisor = Supervisor(policy)
+
+    # In your agent loop:
+    iteration = supervisor.record_iteration()  # raises if over limit
+    result = await supervisor.call("web_search", search_fn, query="python")
+
+    if result.succeeded:
+        process(result.output)
+    else:
+        handle_error(result.error)
+
+    # When done:
+    supervisor.finish()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, List, Optional, Tuple
+
+from .audit import AuditLog, AuditOutcome, AuditPhase
+from .budget import BudgetSnapshot, BudgetTracker
+from .circuit_breaker import CircuitBreaker
+from .errors import AgentHandlerError
+from .policy import Policy
+from .redact import Redactor
+
+if TYPE_CHECKING:
+    from .approval import ApprovalQueue
+    from .observe import Observer
+    from .store import Checkpoint, StateStore
+
+# Approval id authorizing the current call_approved() invocation, scoped to the task.
+_PREAPPROVED: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "agenthandler_preapproved", default=None
+)
+# Circuit breaker the current call_with_breaker() invocation counts against.
+_BREAKER: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "agenthandler_breaker", default=None
+)
+
+
+@dataclass
+class SupervisedResult:
+    """Result of a supervised tool call."""
+
+    output: Any = None
+    error: Optional[AgentHandlerError] = None
+    succeeded: bool = False
+    duration_ms: int = 0
+    budget: Optional[BudgetSnapshot] = None
+    tool_name: Optional[str] = None
+
+    def user_message(self) -> str:
+        """Always returns something — either the output or an error message."""
+        if self.succeeded and self.output is not None:
+            return str(self.output)
+        if self.error:
+            return self.error.user_message()
+        return "No output (tool returned nothing)"
+
+
+class Supervisor:
+    """Supervises tool calls with policy enforcement.
+
+    One Supervisor per skill invocation. Tracks budget across multiple
+    tool calls within a single request.
+    """
+
+    def __init__(
+        self,
+        policy: Policy,
+        audit: Optional[AuditLog] = None,
+        store: Optional[StateStore] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        approval_queue: Optional[ApprovalQueue] = None,
+        observer: Optional[Observer] = None,
+        pre_guardrails: Optional[List[Any]] = None,
+        post_guardrails: Optional[List[Any]] = None,
+    ):
+        from .store import AtomicCheckpointStore
+
+        if store is not None and not isinstance(store, AtomicCheckpointStore):
+            raise ValueError(
+                "Supervisor persistence requires atomic checkpoint support "
+                "(AtomicCheckpointStore); implement update_supervisor_checkpoint "
+                "or omit store for in-memory execution"
+            )
+        self._policy = policy
+        self._budget = BudgetTracker.from_policy(policy)
+        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self._tool_call_times: Dict[str, List[float]] = {}
+        self._audit = audit or AuditLog.noop()
+        self._pre_guardrails: List[Any] = pre_guardrails or []
+        self._post_guardrails: List[Any] = post_guardrails or []
+        self._recent_calls: List[Dict[str, Any]] = []
+        self._last_call_meta: Dict[str, Any] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "model": "",
+        }
+        self._start_time = time.monotonic()
+        self._last_activity = time.monotonic()
+        self._paused = False
+        self._consumed_approvals: set[str] = set()
+
+        # Optional durable state
+        self._store = store
+        self._session_id = session_id
+        self._resume_count = 0
+        self._agent_id = agent_id
+        self._approval_queue = approval_queue
+        self._observer = observer
+
+        # Privacy shielding
+        redact_cats = policy.redact
+        self._redactor: Optional[Redactor] = None
+        if redact_cats is None or (isinstance(redact_cats, list) and len(redact_cats) > 0):
+            self._redactor = Redactor(categories=redact_cats)
+        self._redact_direction = policy.redact_direction
+
+        self._audit.record(
+            AuditPhase.REQUEST_START,
+            AuditOutcome.INFO,
+            detail=f"Supervisor started with policy: max_iter={policy.max_iterations}, "
+            f"tool_timeout={policy.tool_timeout}s, token_budget={policy.token_budget}",
+        )
+
+    @classmethod
+    def with_defaults(cls) -> "Supervisor":
+        """Create a supervisor with default policy."""
+        return cls(Policy())
+
+    @property
+    def policy(self) -> Policy:
+        return self._policy
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self._session_id
+
+    @property
+    def resume_count(self) -> int:
+        """Resume generation owned by this supervisor; unchanged for its lifetime."""
+        return self._resume_count
+
+    @property
+    def supports_atomic_checkpoints(self) -> bool:
+        """Whether the configured store can fence stale checkpoint writers."""
+        from .store import AtomicCheckpointStore
+
+        return isinstance(self._store, AtomicCheckpointStore)
+
+    @property
+    def agent_id(self) -> Optional[str]:
+        return self._agent_id
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        self._paused = value
+
+    def budget(self) -> BudgetSnapshot:
+        """Get current budget snapshot."""
+        return self._budget.snapshot()
+
+    def record_tokens(self, tokens: int) -> int:
+        """Record token usage. Returns new total. Raises AgentHandlerError if over budget."""
+        try:
+            return self._budget.record_tokens(tokens)
+        finally:
+            # BudgetTracker charges before raising an over-limit error. Preserve
+            # that usage too, including late responses after operator pause.
+            self._auto_checkpoint()
+
+    def record_iteration(self) -> int:
+        """Record an iteration of the agent loop. Returns iteration count.
+        Raises AgentHandlerError if max iterations exceeded.
+        """
+        self._last_activity = time.monotonic()
+        try:
+            count = self._budget.record_iteration()
+            self._audit.record(
+                AuditPhase.ITERATION_CHECK,
+                AuditOutcome.ALLOWED,
+                detail=f"Iteration {count} / {self._policy.max_iterations}",
+            )
+            return count
+        except AgentHandlerError as e:
+            self._audit.record(
+                AuditPhase.ITERATION_CHECK,
+                AuditOutcome.DENIED,
+                detail=str(e),
+            )
+            raise
+        finally:
+            self._auto_checkpoint()
+
+    def circuit_breaker_states(self) -> Dict[str, str]:
+        """Get current circuit breaker states for all tracked tools."""
+        return {name: cb.state.value for name, cb in self._circuit_breakers.items()}
+
+    def reset_circuit_breaker(self, tool_name: str) -> None:
+        """Close ``tool_name``'s breaker and forget its failures.
+
+        For callers that replace what stands behind a tool name, e.g. moving
+        ``model`` calls to a fallback provider.
+        """
+        breaker = self._circuit_breakers.get(tool_name)
+        if breaker is not None:
+            breaker.record_success()
+
+    def _get_circuit_breaker(self, tool_name: str) -> CircuitBreaker:
+        """Get or create a circuit breaker for a tool."""
+        if tool_name not in self._circuit_breakers:
+            self._circuit_breakers[tool_name] = CircuitBreaker(
+                threshold=self._policy.circuit_breaker_threshold,
+                reset_after=self._policy.circuit_breaker_reset,
+            )
+        return self._circuit_breakers[tool_name]
+
+    def begin_request(self) -> None:
+        """Start an application-authorized attempt with a fresh request deadline.
+
+        Lifetime token/iteration budgets, policy, circuit breakers, and operator
+        pause state are preserved. Call once at an outer request boundary, never
+        once per tool call. DurableTaskRunner also checks persisted session state
+        before opening an attempt; this method does not authorize session resume.
+        """
+        self._check_paused()
+        self._start_time = time.monotonic()
+        self._last_activity = self._start_time
+        self._audit.record(
+            AuditPhase.REQUEST_START,
+            AuditOutcome.INFO,
+            detail="New request attempt; existing lifetime budgets preserved",
+        )
+
+    def _check_request_timeout(self) -> None:
+        """Check if the overall request has timed out."""
+        elapsed = time.monotonic() - self._start_time
+        if elapsed > self._policy.request_timeout:
+            raise AgentHandlerError.timeout(int(elapsed * 1000))
+
+    def _check_silence(self) -> None:
+        """Check the dead man's switch."""
+        if self._policy.silence_timeout is None:
+            return
+        silence = time.monotonic() - self._last_activity
+        if silence > self._policy.silence_timeout:
+            raise AgentHandlerError.dead_man_switch(int(silence * 1000))
+
+    def _check_paused(self) -> None:
+        """Fence stale generations and persisted operator controls before work."""
+        if self._store is not None and self._session_id is not None:
+            from .store import SessionStatus
+
+            try:
+                checkpoint = self._store.load_checkpoint(self._session_id)
+            except Exception as exc:
+                raise AgentHandlerError(
+                    "checkpoint_unavailable", "Cannot verify persisted session authorization"
+                ) from exc
+            same_generation = (
+                checkpoint is not None and checkpoint.resume_count == self._resume_count
+            )
+            if (
+                checkpoint is None
+                or not same_generation
+                or checkpoint.status != SessionStatus.RUNNING
+            ):
+                self._paused = True
+                if (
+                    checkpoint is None
+                    or not same_generation
+                    or checkpoint.status != SessionStatus.PAUSED
+                ):
+                    self._store = None
+        if self._paused and self._session_id:
+            raise AgentHandlerError.agent_paused(self._session_id)
+
+    def _check_confirm(self, tool_name: str, kwargs: Dict[str, Any]) -> Optional[str]:
+        """Check if this tool requires confirmation.
+
+        If an approval queue is configured, queues the call and returns an
+        approval_id. Otherwise raises AgentHandlerError.
+
+        Returns:
+            approval_id if queued, None if no confirmation needed.
+        """
+        if tool_name not in self._policy.require_confirm:
+            return None
+        approved_id = _PREAPPROVED.get()
+        if approved_id is not None:
+            _PREAPPROVED.set(None)  # one approval authorizes exactly one call
+            self._consume_approval(approved_id, tool_name, kwargs)
+            return None
+        if self._approval_queue is not None and self._session_id:
+            req = self._approval_queue.submit(
+                tool_name, kwargs, self._session_id, ttl_s=self._policy.approval_ttl(tool_name)
+            )
+            return req.approval_id
+        raise AgentHandlerError.policy_denied(f"Tool '{tool_name}' requires user confirmation")
+
+    def _consume_approval(self, approval_id: str, tool_name: str, kwargs: Dict[str, Any]) -> None:
+        """Accept a human approval once, only for this session, tool and arguments."""
+        from .approval import ApprovalStatus
+
+        queue = self._approval_queue
+        req = queue.get(approval_id) if queue is not None else None
+        if (
+            req is None
+            or req.status != ApprovalStatus.APPROVED
+            or req.session_id != self._session_id
+            or req.tool_name != tool_name
+            or req.tool_args != kwargs
+            or approval_id in self._consumed_approvals
+        ):
+            raise AgentHandlerError.approval_denied(tool_name, "No matching unused approval")
+        self._consumed_approvals.add(approval_id)
+
+    def restore_rate_history(self, ages: Dict[str, List[float]]) -> None:
+        """Seed per-tool rate limits with calls an earlier supervisor already made.
+
+        ``ages`` maps a tool name to how many seconds ago each earlier call
+        passed its scope check. Only calls inside the one-minute window count.
+        Use this when rebuilding a supervisor for a session that keeps running
+        elsewhere (for example, a worker that restores one per claimed session).
+        """
+        now = time.monotonic()
+        for tool_name, tool_ages in ages.items():
+            restored = [now - age for age in tool_ages if 0.0 <= age < 60.0]
+            if restored:
+                existing = self._tool_call_times.get(tool_name, [])
+                self._tool_call_times[tool_name] = sorted(restored + existing)
+
+    def _check_scopes(self, tool_name: str, kwargs: Dict[str, Any]) -> None:
+        """Check if tool arguments satisfy scope rules."""
+        now = time.monotonic()
+        for scope in self._policy.tool_scopes:
+            if scope.tool_name == tool_name:
+                # Check argument rules
+                error_msg = scope.check_args(kwargs)
+                if error_msg:
+                    raise AgentHandlerError.scope_denied(tool_name, error_msg)
+                # Check rate limit
+                if scope.max_calls_per_minute is not None:
+                    times = self._tool_call_times.get(tool_name, [])
+                    cutoff = now - 60.0
+                    recent = [t for t in times if t > cutoff]
+                    if len(recent) >= scope.max_calls_per_minute:
+                        raise AgentHandlerError.rate_limited(tool_name, scope.max_calls_per_minute)
+                    recent.append(now)
+                    self._tool_call_times[tool_name] = recent
+
+    async def call_approved(
+        self,
+        approval_id: str,
+        tool_name: str,
+        fn: Callable[..., Coroutine[Any, Any, Any]],
+        /,
+        **kwargs: Any,
+    ) -> SupervisedResult:
+        """Run a confirm-gated call that a human already approved.
+
+        The approval must be APPROVED in this supervisor's queue for this
+        session, tool and exact arguments, and is consumed by the call. Every
+        other check (pause, scopes, rate limits, guardrails, timeout, budget,
+        redaction, audit) still applies. Single use is tracked per Supervisor
+        instance; durable single use across instances is the caller's job (for
+        example, by recording each dispatched approval in durable storage).
+        """
+        token = _PREAPPROVED.set(approval_id)
+        try:
+            return await self.call(tool_name, fn, **kwargs)
+        finally:
+            _PREAPPROVED.reset(token)
+
+    async def call_with_breaker(
+        self,
+        breaker: str,
+        tool_name: str,
+        fn: Callable[..., Coroutine[Any, Any, Any]],
+        /,
+        **kwargs: Any,
+    ) -> SupervisedResult:
+        """Supervise a call as ``tool_name`` that counts against breaker ``breaker``.
+
+        Every check (confirm, scopes, timeout, budget, guardrails, audit) is the
+        one ``tool_name`` gets; only the circuit breaker is separate, e.g. so a
+        summarizer's failures do not open the main ``model`` breaker.
+        """
+        token = _BREAKER.set(breaker)
+        try:
+            return await self.call(tool_name, fn, **kwargs)
+        finally:
+            _BREAKER.reset(token)
+
+    async def _pre_checks(
+        self, tool_name: str, kwargs: Dict[str, Any], start: float, gr_context: Dict[str, Any]
+    ) -> Tuple[Optional[SupervisedResult], Any]:
+        """Every check before a call runs: (a refusal, None) or (None, cached output)."""
+        # Pre-flight checks
+        try:
+            self._check_paused()
+            self._check_request_timeout()
+            self._check_silence()
+            approval_id = self._check_confirm(tool_name, kwargs)
+            if approval_id is not None:
+                self._audit.record(
+                    AuditPhase.POLICY_CHECK,
+                    AuditOutcome.DENIED,
+                    target=tool_name,
+                    detail=f"Queued for approval: {approval_id}",
+                    metadata={"approval_id": approval_id},
+                )
+                return (
+                    SupervisedResult(
+                        error=AgentHandlerError.approval_pending(tool_name, approval_id),
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                        budget=self._budget.snapshot(),
+                        tool_name=tool_name,
+                    ),
+                    None,
+                )
+            self._check_scopes(tool_name, kwargs)
+        except AgentHandlerError as e:
+            phase = (
+                AuditPhase.SCOPE_CHECK
+                if e.kind in ("scope_denied", "rate_limited")
+                else AuditPhase.POLICY_CHECK
+            )
+            self._audit.record(
+                phase,
+                AuditOutcome.DENIED,
+                target=tool_name,
+                detail=str(e),
+            )
+            return (
+                SupervisedResult(
+                    error=e,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                ),
+                None,
+            )
+
+        # Circuit breaker check
+        cb = self._get_circuit_breaker(_BREAKER.get() or tool_name)
+        try:
+            cb.check(tool_name)
+        except AgentHandlerError as e:
+            self._audit.record(
+                AuditPhase.CIRCUIT_BREAKER,
+                AuditOutcome.DENIED,
+                target=tool_name,
+                detail=str(e),
+            )
+            return (
+                SupervisedResult(
+                    error=e,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                ),
+                None,
+            )
+
+        # Pre-call guardrails
+        cached_output: Any = None
+        for gr in self._pre_guardrails:
+            result = await self._run_guardrail(gr, tool_name, kwargs, None, gr_context, "pre")
+            if not result.allowed:
+                self._audit.record(
+                    AuditPhase.POLICY_CHECK,
+                    AuditOutcome.DENIED,
+                    target=tool_name,
+                    detail=f"Guardrail '{result.guardrail_name}' blocked: {result.reason}",
+                )
+                return (
+                    SupervisedResult(
+                        error=AgentHandlerError.policy_denied(
+                            f"{result.guardrail_name}: {result.reason}"
+                        ),
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                        budget=self._budget.snapshot(),
+                        tool_name=tool_name,
+                    ),
+                    None,
+                )
+            # Guardrail may replace the output (e.g., idempotency cache hit)
+            if result.replacement_output is not None:
+                cached_output = result.replacement_output
+        return None, cached_output
+
+    async def preflight(self, tool_name: str, /, **kwargs: Any) -> Optional[AgentHandlerError]:
+        """Run every check ``call`` runs before executing (pause, timeouts, approval,
+        scopes, circuit breaker, pre-guardrails) without executing anything; the
+        refusal, if any. For work that leaves the process before its result is
+        recorded through ``call`` (a queued batch request)."""
+        context = self._build_guardrail_context()
+        refused, _ = await self._pre_checks(tool_name, kwargs, time.monotonic(), context)
+        return refused.error if refused is not None else None
+
+    async def call(
+        self,
+        tool_name: str,
+        fn: Callable[..., Coroutine[Any, Any, Any]],
+        /,
+        **kwargs: Any,
+    ) -> SupervisedResult:
+        """Supervise an async tool call.
+
+        Args:
+            tool_name: Name of the tool being called
+            fn: Async callable to execute
+            **kwargs: Arguments passed to fn
+
+        Returns:
+            SupervisedResult with output or error (never raises)
+        """
+        start = time.monotonic()
+        self._last_activity = start
+        gr_context = self._build_guardrail_context()
+        refused, cached_output = await self._pre_checks(tool_name, kwargs, start, gr_context)
+        if refused is not None:
+            return refused
+        cb = self._get_circuit_breaker(_BREAKER.get() or tool_name)
+
+        # Outbound PII redaction — clean args before they reach the tool
+        exec_kwargs = kwargs
+        if self._redactor and self._redact_direction in ("outbound", "both"):
+            exec_kwargs, redact_count = self._redactor.redact_dict(kwargs)
+            if redact_count > 0:
+                self._audit.record(
+                    AuditPhase.POLICY_CHECK,
+                    AuditOutcome.INFO,
+                    target=tool_name,
+                    detail=f"Redacted {redact_count} PII value(s) from outbound args",
+                )
+
+        # Execute with timeout
+        audit_args = {k: str(v)[:100] for k, v in exec_kwargs.items()}
+        if self._redactor:
+            audit_args, _ = self._redactor.redact_dict(audit_args)
+        self._audit.record(
+            AuditPhase.TOOL_CALL,
+            AuditOutcome.ALLOWED,
+            target=tool_name,
+            metadata={"args": audit_args},
+        )
+
+        # If a pre-guardrail provided cached output (idempotency), skip execution
+        if cached_output is not None:
+            output = cached_output
+            duration_ms = int((time.monotonic() - start) * 1000)
+            cb.record_success()
+            self._audit.record(
+                AuditPhase.TOOL_CALL,
+                AuditOutcome.INFO,
+                target=tool_name,
+                detail=f"Returned cached result in {duration_ms}ms",
+            )
+            result = SupervisedResult(
+                output=output,
+                succeeded=True,
+                duration_ms=duration_ms,
+                budget=self._budget.snapshot(),
+                tool_name=tool_name,
+            )
+            self._observe_call(result)
+            return result
+
+        timeout = self._policy.tool_timeouts.get(tool_name, self._policy.tool_timeout)
+        try:
+            output = await asyncio.wait_for(fn(**exec_kwargs), timeout=timeout)
+        except asyncio.TimeoutError:
+            cb.record_failure()
+            error = AgentHandlerError.timeout(int(timeout * 1000))
+            self._audit.record(
+                AuditPhase.TOOL_CALL,
+                AuditOutcome.TIMED_OUT,
+                target=tool_name,
+                detail=str(error),
+            )
+            r = SupervisedResult(
+                error=error,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                budget=self._budget.snapshot(),
+                tool_name=tool_name,
+            )
+            self._observe_call(r)
+            return r
+        except Exception as e:
+            cb.record_failure()
+            error_msg = str(e)
+            if self._redactor:
+                error_msg = self._redactor.redact(error_msg).text
+            error = AgentHandlerError.tool_error(error_msg)
+            self._audit.record(
+                AuditPhase.TOOL_CALL,
+                AuditOutcome.FAILED,
+                target=tool_name,
+                detail=error_msg,
+            )
+            r = SupervisedResult(
+                error=error,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                budget=self._budget.snapshot(),
+                tool_name=tool_name,
+            )
+            self._observe_call(r)
+            return r
+
+        # Success
+        cb.record_success()
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self._last_activity = time.monotonic()
+
+        # Post-call guardrails — may block, modify, or allow the output
+        for gr in self._post_guardrails:
+            result = await self._run_guardrail(
+                gr, tool_name, exec_kwargs, output, gr_context, "post"
+            )
+            if not result.allowed:
+                self._audit.record(
+                    AuditPhase.POLICY_CHECK,
+                    AuditOutcome.DENIED,
+                    target=tool_name,
+                    detail=f"Post-guardrail '{result.guardrail_name}' blocked: {result.reason}",
+                )
+                return SupervisedResult(
+                    error=AgentHandlerError.policy_denied(
+                        f"{result.guardrail_name}: {result.reason}"
+                    ),
+                    duration_ms=duration_ms,
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                )
+            if result.replacement_output is not None:
+                output = result.replacement_output
+                self._audit.record(
+                    AuditPhase.POLICY_CHECK,
+                    AuditOutcome.INFO,
+                    target=tool_name,
+                    detail=f"Guardrail '{result.guardrail_name}' replaced output: {result.reason}",
+                )
+
+        # Track this call in recent_calls for anomaly detection
+        self._recent_calls.append(
+            {
+                "tool": tool_name,
+                "args_summary": {k: str(v)[:50] for k, v in exec_kwargs.items()},
+                "duration_ms": duration_ms,
+            }
+        )
+        if len(self._recent_calls) > 50:
+            self._recent_calls = self._recent_calls[-50:]
+
+        # Call idempotency cache recording on any pre-guardrail that supports it
+        for gr in self._pre_guardrails:
+            if hasattr(gr, "record"):
+                gr.record(tool_name, exec_kwargs, output)
+
+        # Inbound PII redaction — clean output before agent sees it
+        # Every string at any depth (lists, nested values, dict keys): M4-D8a.
+        if self._redactor and self._redact_direction in ("inbound", "both"):
+            cleaned, count = self._redactor.redact_value(output)
+            if count > 0:
+                self._audit.record(
+                    AuditPhase.POLICY_CHECK,
+                    AuditOutcome.INFO,
+                    target=tool_name,
+                    detail=f"Redacted {count} PII value(s) from output",
+                )
+                output = cleaned
+
+        # Record token usage if output includes it.
+        # Protocol: tool outputs can include {"tokens_used": N} for legacy
+        # single-value budgeting, or {"input_tokens": N, "output_tokens": M,
+        # "model": "..."} for full cost attribution.
+        tokens = 0
+        call_input_tokens = 0
+        call_output_tokens = 0
+        call_model = ""
+        if isinstance(output, dict):
+            if "tokens_used" in output:
+                tokens = output["tokens_used"]
+            if "input_tokens" in output:
+                call_input_tokens = output.get("input_tokens", 0) or 0
+            if "output_tokens" in output:
+                call_output_tokens = output.get("output_tokens", 0) or 0
+            if "model" in output:
+                call_model = output.get("model", "") or ""
+            # If both input/output are provided but tokens_used isn't, compute it
+            if tokens == 0 and (call_input_tokens or call_output_tokens):
+                tokens = call_input_tokens + call_output_tokens
+
+        # Stash call-level metadata for _observe_call
+        self._last_call_meta = {
+            "input_tokens": call_input_tokens,
+            "output_tokens": call_output_tokens,
+            "model": call_model,
+        }
+
+        if tokens > 0:
+            try:
+                self._budget.record_tokens(tokens)
+            except AgentHandlerError as e:
+                self._audit.record(
+                    AuditPhase.BUDGET_CHECK,
+                    AuditOutcome.BUDGET_EXCEEDED,
+                    target=tool_name,
+                    detail=str(e),
+                )
+                # Budget exceeded — still return the output (best effort)
+                return SupervisedResult(
+                    output=output,
+                    error=e,
+                    succeeded=True,  # tool succeeded, budget is over
+                    duration_ms=duration_ms,
+                    budget=self._budget.snapshot(),
+                    tool_name=tool_name,
+                )
+
+        self._audit.record(
+            AuditPhase.TOOL_CALL,
+            AuditOutcome.INFO,
+            target=tool_name,
+            detail=f"Completed in {duration_ms}ms",
+        )
+
+        self._auto_checkpoint()
+
+        result = SupervisedResult(
+            output=output,
+            succeeded=True,
+            duration_ms=duration_ms,
+            budget=self._budget.snapshot(),
+            tool_name=tool_name,
+        )
+        self._observe_call(result)
+        return result
+
+    async def execute_approved(
+        self,
+        approval_id: str,
+        fn: Callable[..., Coroutine[Any, Any, Any]],
+    ) -> SupervisedResult:
+        """Execute a previously-approved tool call.
+
+        Looks up the approval in the queue, verifies it was approved,
+        then executes the tool call bypassing the confirmation check.
+
+        Args:
+            approval_id: The approval ID returned by the original call().
+            fn: The async callable to execute (same function the agent
+                originally tried to call).
+
+        Returns:
+            SupervisedResult — same as call().
+        """
+        if self._approval_queue is None:
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied("No approval queue configured"),
+                budget=self._budget.snapshot(),
+            )
+
+        from .approval import ApprovalStatus
+
+        req = self._approval_queue.get(approval_id)
+        if req is None:
+            return SupervisedResult(
+                error=AgentHandlerError.policy_denied(f"Approval {approval_id} not found"),
+                budget=self._budget.snapshot(),
+            )
+        if req.status == ApprovalStatus.DENIED:
+            return SupervisedResult(
+                error=AgentHandlerError.approval_denied(req.tool_name, req.deny_reason),
+                budget=self._budget.snapshot(),
+                tool_name=req.tool_name,
+            )
+        if req.status != ApprovalStatus.APPROVED:
+            return SupervisedResult(
+                error=AgentHandlerError.approval_pending(req.tool_name, approval_id),
+                budget=self._budget.snapshot(),
+                tool_name=req.tool_name,
+            )
+
+        # Approved — execute bypassing _check_confirm
+        self._audit.record(
+            AuditPhase.POLICY_CHECK,
+            AuditOutcome.ALLOWED,
+            target=req.tool_name,
+            detail=f"Approved (id: {approval_id}, by: {req.resolved_by})",
+            metadata={"approval_id": approval_id},
+        )
+
+        # Run through the normal execution path but skip confirmation
+        # We temporarily remove the tool from require_confirm
+        original_confirm = list(self._policy.require_confirm)
+        self._policy.require_confirm = [
+            t for t in self._policy.require_confirm if t != req.tool_name
+        ]
+        try:
+            result = await self.call(req.tool_name, fn, **req.tool_args)
+        finally:
+            self._policy.require_confirm = original_confirm
+
+        return result
+
+    def call_sync(
+        self,
+        tool_name: str,
+        fn: Callable[..., Any],
+        **kwargs: Any,
+    ) -> SupervisedResult:
+        """Supervise a synchronous tool call.
+
+        Wraps the sync function and runs it through the async supervisor.
+        For use when you don't have an event loop.
+        """
+
+        async def _wrapper(**kw: Any) -> Any:
+            return fn(**kw)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're inside an async context — can't use run()
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, self.call(tool_name, _wrapper, **kwargs))
+                    timeout = self._policy.tool_timeouts.get(tool_name, self._policy.tool_timeout)
+                    return future.result(timeout=timeout + 5)
+            else:
+                return loop.run_until_complete(self.call(tool_name, _wrapper, **kwargs))
+        except RuntimeError:
+            return asyncio.run(self.call(tool_name, _wrapper, **kwargs))
+
+    def finish(self) -> BudgetSnapshot:
+        """Mark the request as complete. Returns final budget snapshot."""
+        snap = self._budget.snapshot()
+        elapsed = time.monotonic() - self._start_time
+        self._audit.record(
+            AuditPhase.REQUEST_END,
+            AuditOutcome.INFO,
+            detail=f"Request complete: {snap.iterations} iterations, "
+            f"{snap.tokens_used} tokens, {int(elapsed * 1000)}ms",
+            metadata={
+                "tokens_used": snap.tokens_used,
+                "iterations": snap.iterations,
+                "duration_ms": int(elapsed * 1000),
+            },
+        )
+        return snap
+
+    # ------------------------------------------------------------------
+    # Checkpoint support (opt-in via store parameter)
+    # ------------------------------------------------------------------
+
+    def to_checkpoint_data(self) -> Dict[str, Any]:
+        """Export supervisor state as a dict suitable for a Checkpoint."""
+        snap = self._budget.snapshot()
+        cb_states: Dict[str, Dict[str, Any]] = {}
+        for name, cb in self._circuit_breakers.items():
+            cb_states[name] = {
+                "state": cb.state.value,
+                "consecutive_failures": cb.consecutive_failures,
+            }
+            opened_at = cb._opened_at
+            if cb_states[name]["state"] == "open" and opened_at is not None:
+                # Wall-clock time the breaker opened, so a restore keeps its age.
+                cb_states[name]["opened_at"] = time.time() - (time.monotonic() - opened_at)
+        return {
+            "iterations": snap.iterations,
+            "tokens_used": snap.tokens_used,
+            "token_limit": snap.token_limit,
+            "iteration_limit": snap.iteration_limit,
+            "circuit_breaker_states": cb_states,
+        }
+
+    @classmethod
+    def restore_from_checkpoint(
+        cls,
+        checkpoint: Checkpoint,
+        audit: Optional[AuditLog] = None,
+        store: Optional[StateStore] = None,
+        policy_override: Optional[Dict[str, Any]] = None,
+        approval_queue: Optional[ApprovalQueue] = None,
+        observer: Optional[Observer] = None,
+        pre_guardrails: Optional[List[Any]] = None,
+        post_guardrails: Optional[List[Any]] = None,
+    ) -> Supervisor:
+        """Rebuild a Supervisor from a checkpoint.
+
+        Restores budget counters and circuit breaker states so the agent
+        can continue where it left off.
+
+        Args:
+            checkpoint: The checkpoint to restore from.
+            audit: Optional audit log for the restored supervisor.
+            store: Optional state store for auto-checkpointing.
+            policy_override: If provided, use this policy dict instead of the
+                           checkpoint's. This is the SECURITY mechanism —
+                           SessionManager always passes the original immutable
+                           policy here so agents cannot downgrade supervision.
+        """
+        from .store import SessionStatus
+
+        # SECURITY: prefer the override (original immutable policy) over
+        # whatever the checkpoint contains.
+        policy_dict = policy_override if policy_override is not None else checkpoint.policy_dict
+        policy = Policy.from_dict(policy_dict)
+        sv = cls(
+            policy,
+            audit=audit,
+            store=store,
+            session_id=checkpoint.session_id,
+            agent_id=checkpoint.agent_id,
+            approval_queue=approval_queue,
+            observer=observer,
+            pre_guardrails=pre_guardrails,
+            post_guardrails=post_guardrails,
+        )
+        sv._resume_count = checkpoint.resume_count
+        # Restore budget counters
+        if checkpoint.tokens_used > 0:
+            sv._budget._tokens_used = checkpoint.tokens_used
+        if checkpoint.iterations > 0:
+            sv._budget._iterations = checkpoint.iterations
+        # Restore circuit breaker states
+        for name, cb_data in checkpoint.circuit_breaker_states.items():
+            from .circuit_breaker import CircuitState
+
+            cb = sv._get_circuit_breaker(name)
+            cb._consecutive_failures = cb_data.get("consecutive_failures", 0)
+            state_str = cb_data.get("state", "closed")
+            cb._state = CircuitState(state_str)
+            if cb._state == CircuitState.OPEN:
+                # Keep the time already spent open; older checkpoints restart the clock.
+                opened_at = cb_data.get("opened_at")
+                age = max(0.0, time.time() - opened_at) if opened_at is not None else 0.0
+                cb._opened_at = time.monotonic() - age
+        # Restore pause state
+        sv._paused = checkpoint.status == SessionStatus.PAUSED
+        return sv
+
+    def _build_guardrail_context(self) -> Dict[str, Any]:
+        """Build the context dict passed to guardrails."""
+        return {
+            "session_id": self._session_id or "",
+            "agent_id": self._agent_id or "",
+            "recent_calls": list(self._recent_calls),
+            "iterations": self._budget.snapshot().iterations,
+            "tokens_used": self._budget.snapshot().tokens_used,
+        }
+
+    async def _run_guardrail(
+        self,
+        guardrail: Any,
+        tool_name: str,
+        kwargs: Dict[str, Any],
+        output: Any,
+        context: Dict[str, Any],
+        phase: str,
+    ) -> Any:
+        """Run a guardrail, handling both sync and async check methods."""
+        from .guardrails.types import GuardrailResult
+
+        try:
+            # Try async methods first
+            if hasattr(guardrail, "check_async"):
+                if phase == "pre":
+                    # Some async checks take phase, some take output
+                    import inspect
+
+                    sig = inspect.signature(guardrail.check_async)
+                    if "phase" in sig.parameters:
+                        return await guardrail.check_async(
+                            tool_name, kwargs, output, context, phase=phase
+                        )
+                    if "output" in sig.parameters:
+                        return await guardrail.check_async(tool_name, kwargs, output, context)
+                    return await guardrail.check_async(tool_name, kwargs, context)
+                else:
+                    import inspect
+
+                    sig = inspect.signature(guardrail.check_async)
+                    if "phase" in sig.parameters:
+                        return await guardrail.check_async(
+                            tool_name, kwargs, output, context, phase=phase
+                        )
+                    if "output" in sig.parameters:
+                        return await guardrail.check_async(tool_name, kwargs, output, context)
+                    return await guardrail.check_async(tool_name, kwargs, context)
+            if hasattr(guardrail, "check"):
+                # Sync check — some take output, some don't
+                import inspect
+
+                sig = inspect.signature(guardrail.check)
+                params = sig.parameters
+                if "output" in params:
+                    return guardrail.check(tool_name, kwargs, output, context)
+                return guardrail.check(tool_name, kwargs, context)
+        except Exception as e:
+            return GuardrailResult(
+                allowed=True,
+                guardrail_name=getattr(guardrail, "name", "unknown"),
+                reason=f"Guardrail error (allowing): {e}",
+            )
+        return GuardrailResult.allow(getattr(guardrail, "name", "unknown"))
+
+    def _observe_call(self, result: SupervisedResult) -> None:
+        """Record a tool call with the observer if configured."""
+        if self._observer is None or result.tool_name is None:
+            return
+        meta = self._last_call_meta
+        self._observer.record_tool_call(
+            tool_name=result.tool_name,
+            duration_ms=result.duration_ms,
+            succeeded=result.succeeded,
+            session_id=self._session_id or "",
+            agent_id=self._agent_id or "",
+            error_kind=result.error.kind if result.error else "",
+            input_tokens=meta.get("input_tokens", 0),
+            output_tokens=meta.get("output_tokens", 0),
+            model=meta.get("model", ""),
+        )
+        # Clear for next call
+        self._last_call_meta = {"input_tokens": 0, "output_tokens": 0, "model": ""}
+
+    def _auto_checkpoint(self) -> None:
+        """Atomically persist statistics for this running or paused resume generation.
+
+        Lifecycle state and other application metadata belong to SessionManager.
+        Custom stores without AtomicCheckpointStore cannot safely auto-checkpoint;
+        no read/replace fallback is attempted. Durable callers must require the
+        capability explicitly using supports_atomic_checkpoints.
+        """
+        from .store import AtomicCheckpointStore, Checkpoint, SessionStatus
+
+        store = self._store
+        if self._session_id is None or not isinstance(store, AtomicCheckpointStore):
+            return
+        data = self.to_checkpoint_data()
+        cp = Checkpoint(
+            session_id=self._session_id,
+            agent_id=self._agent_id or "",
+            status=SessionStatus.RUNNING,
+            iterations=data["iterations"],
+            tokens_used=data["tokens_used"],
+            circuit_breaker_states=data["circuit_breaker_states"],
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            if not store.update_supervisor_checkpoint(cp, expected_resume_count=self._resume_count):
+                # Another manager stopped, deleted, or resumed this
+                # session. Retire the stale in-memory writer immediately.
+                self._paused = True
+                self._store = None
+            else:
+                # Preserve PAUSED writers for late usage accounting while
+                # ensuring they cannot begin another tool call.
+                self._check_paused()
+        except Exception:
+            pass  # checkpoint must never crash the request

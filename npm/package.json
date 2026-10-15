@@ -1,0 +1,25 @@
+{
+  "name": "agenthandler",
+  "version": "0.94.0",
+  "description": "AgentHandler is a Python package. Install with: pip install agenthandler",
+  "license": "Apache-2.0",
+  "author": "arunvenkatadri",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arunvenkatadri/agenthandler"
+  },
+  "homepage": "https://github.com/arunvenkatadri/agenthandler",
+  "keywords": [
+    "agenthandler",
+    "ai-agents",
+    "supervision",
+    "guardrails"
+  ],
+  "bin": {
+    "agenthandler": "./bin/agenthandler.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ]
+}
