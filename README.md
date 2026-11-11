@@ -48,6 +48,7 @@ Using Claude Code or Codex? Install the skill so your coding agent knows the API
 ```
 
 For Codex, copy `.agents/skills/agenthandler/` into your repo or `~/.agents/skills/`.
+The plugin itself lives in `plugins/agenthandler/`.
 
 ## Quick start
 
