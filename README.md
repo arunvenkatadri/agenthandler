@@ -62,6 +62,9 @@ async def web_search(query: str) -> str:
     return f"Results for: {query}"
 
 async def main():
+    # Count this round against max_iterations (raises when the limit is hit)
+    supervisor.record_iteration()
+
     # Supervise a tool call
     result = await supervisor.call("web_search", web_search, query="python async")
 
@@ -79,6 +82,12 @@ async def main():
 
 asyncio.run(main())
 ```
+
+`record_iteration()` and `record_tokens()` are explicit because AgentHandler
+does not run your loop — it supervises the calls your loop makes. One
+`supervisor.call()` is not necessarily one iteration, and only you know how many
+tokens your LLM call actually spent. Both raise when they cross a policy limit,
+so the loop stops at the boundary rather than after it.
 
 ## Dashboard
 
@@ -99,7 +108,7 @@ Open `dashboard.html` in a browser for a full management UI:
 The Sessions tab connects to the REST control plane (`uvicorn agenthandler.server:app`) and shows real-time session data. Agent cards show live status and controls work against the real API. The LLM features (prompt generation, chat, pipeline generation) require a backend with an LLM API key: provide your own `/chat` and `/generate-prompt` endpoints.
 
 
-<img width="1383" height="1270" alt="Sdd" src="https://github.com/user-attachments/assets/b4fec9fa-59d4-4476-93ac-19684c835ab0" />
+<img width="1383" height="1270" alt="AgentHandler dashboard — agents, skills, sessions, approvals and costs in one view" src="https://github.com/user-attachments/assets/b4fec9fa-59d4-4476-93ac-19684c835ab0" />
 
 
 
@@ -709,8 +718,18 @@ For production deployments, configure OAuth2 via environment variables:
 AGENTHANDLER_OAUTH_PROVIDER=github \
 AGENTHANDLER_OAUTH_CLIENT_ID=your-client-id \
 AGENTHANDLER_OAUTH_CLIENT_SECRET=your-client-secret \
+AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS=1234567,7654321 \
 uvicorn agenthandler.server:app
 ```
+
+`AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS` is **required** — a comma-separated list of
+the provider user IDs allowed in (GitHub or Google numeric account IDs, not
+usernames or email addresses). The server refuses to start without it.
+
+That is deliberate. Completing an OAuth flow proves who someone is, not that
+they should be allowed to drive your agents; without an allow-list, anyone with
+a GitHub account would qualify. Authentication is not authorization, so the
+allow-list has no default.
 
 This adds `/auth/login` (get the OAuth redirect URL), `/auth/callback` (exchange code for session token), and `/auth/me` (current user info). Session tokens are Bearer tokens — use them the same way as API keys. Supported providers: `github`, `google`.
 
