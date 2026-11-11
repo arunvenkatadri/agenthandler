@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "agenthandler",
-      "source": "./",
+      "source": "./plugins/agenthandler",
       "description": "Governance for AI agent tool calls \u2014 budgets, timeouts, approval gates, circuit breakers, audit logging."
     }
   ],
