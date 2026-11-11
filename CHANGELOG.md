@@ -10,6 +10,14 @@ The open-source relaunch of the AgentHandler governance library, published from 
 new repository with fresh history. Everything shipped in 0.93.0 is still here; the
 entries below cover what changed in the library since then.
 
+### Breaking
+- **OAuth requires an explicit allow-list.** `add_oauth_routes()` now takes
+  `allowed_subjects` and raises at startup when it is empty; the REST control plane
+  reads `AGENTHANDLER_OAUTH_ALLOWED_SUBJECTS`. Previously any identity that completed
+  the provider flow was admitted — authentication was treated as authorization.
+  Deployments that relied on that must list the provider user IDs allowed in, or the
+  server will refuse to start. Failing closed here is deliberate.
+
 ### Added
 - **Durable tasks**: `DurableTaskRunner` with `SqliteTaskStore`, `Milestone`,
   `TaskLimits`, `CallBudget` and `TaskContext` persist milestone progress, operation
@@ -39,6 +47,20 @@ entries below cover what changed in the library since then.
 - `SessionManager` binds a running session to its supervisor generation, so a stale
   process cannot overwrite a resumed session.
 - REST control-plane request models bound the size of every string field.
+
+### Fixed
+- **Dashboard XSS**: `esc()` escaped only `&`, `<` and `>` by way of
+  `textContent`/`innerHTML`, leaving quotes intact while six `onclick=` attributes
+  interpolated its output — a `'` escaped into the handler. It now escapes quotes,
+  and `jsArg()` encodes a JavaScript string argument for that attribute context.
+- **Stream message loss**: a failed handler dropped its message. The Kafka connector
+  committed the consumer's current position rather than the handled offset, so the
+  next success committed past the failure; the Redis connector skipped `XACK` but
+  nothing reclaimed the pending entry. Deliveries now retry before advancing.
+- **Connectors**: read-only enforcement and transaction handling.
+- **Triggers**: recurring cron steps (`*/N`), webhook enable/disable, and scheduler
+  shutdown through a FastAPI `lifespan`.
+- **Routing, pipeline approval and cancellation** regressions.
 
 ### Security
 - `require_auth=True` no longer accepts a placeholder key; OAuth login states are
