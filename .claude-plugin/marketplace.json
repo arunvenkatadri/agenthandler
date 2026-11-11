@@ -1,0 +1,15 @@
+{
+  "name": "agenthandler",
+  "owner": {
+    "name": "arunvenkatadri",
+    "url": "https://github.com/arunvenkatadri"
+  },
+  "plugins": [
+    {
+      "name": "agenthandler",
+      "source": "./",
+      "description": "Governance for AI agent tool calls \u2014 budgets, timeouts, approval gates, circuit breakers, audit logging."
+    }
+  ],
+  "description": "Skills and tooling for AgentHandler, the governance layer for AI agent tool calls."
+}

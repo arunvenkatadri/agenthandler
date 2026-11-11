@@ -1,0 +1,11 @@
+{
+  "name": "agenthandler",
+  "version": "0.94.0",
+  "description": "Governance for AI agent tool calls — budgets, timeouts, approval gates, circuit breakers, audit logging.",
+  "author": {
+    "name": "arunvenkatadri"
+  },
+  "homepage": "https://github.com/arunvenkatadri/agenthandler",
+  "license": "Apache-2.0",
+  "keywords": ["agents", "guardrails", "supervision", "governance", "observability"]
+}
