@@ -4,7 +4,7 @@ All notable changes to AgentHandler are documented here.
 
 ## Unreleased
 
-## [0.94.0] — Unreleased
+## [0.94.0] — 2026-11-11
 
 The open-source relaunch of the AgentHandler governance library, published from a
 new repository with fresh history. Everything shipped in 0.93.0 is still here; the
