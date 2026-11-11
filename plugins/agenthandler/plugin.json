@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schemas.openai.com/agent-plugins/v1/plugin.json",
+  "name": "agenthandler",
+  "version": "0.94.0",
+  "description": "Teaches the agent to use AgentHandler, the governance layer for AI agent tool calls: iteration caps, token and dollar budgets, per-tool timeouts, human approval gates, circuit breakers, guardrails and audit logging. Covers the Supervisor and Policy API, the approval flow and its setup requirements, the two error styles the library uses, durable sessions, and the Kafka stream connector.",
+  "author": {
+    "name": "arunvenkatadri",
+    "url": "https://github.com/arunvenkatadri"
+  },
+  "homepage": "https://github.com/arunvenkatadri/agenthandler",
+  "repository": "https://github.com/arunvenkatadri/agenthandler",
+  "license": "Apache-2.0",
+  "keywords": ["agents", "guardrails", "supervision", "governance", "observability"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "AgentHandler",
+        "shortDescription": "Guardrails for agent tools",
+        "longDescription": "AgentHandler is the governance layer for AI agents. It wraps tool calls with timeouts, token and dollar budgets, circuit breakers, guardrails and audit logging, so one bad tool call cannot drain a budget or loop forever.\n\nThis skill teaches the agent the library's API and its sharp edges: how Supervisor and Policy fit together, why record_iteration() and record_tokens() are explicit, the two different error styles (tool calls return a result, budget checks raise), how the human approval flow is wired and the two settings it silently requires, and the delivery semantics of each stream connector.\n\nAgentHandler works alongside any framework — OpenAI Agents SDK, LangChain, CrewAI, or a hand-written loop — because it supervises the tool calls your loop makes rather than replacing the loop.",
+        "developerName": "arunvenkatadri",
+        "category": "developer-tools",
+        "capabilities": [],
+        "websiteURL": "https://github.com/arunvenkatadri/agenthandler",
+        "supportURL": "https://github.com/arunvenkatadri/agenthandler/issues",
+        "defaultPrompt": "Add supervision to my agent's tool calls with agenthandler",
+        "brandColor": "#E8B23A",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/icon.png"
+      }
+    }
+  }
+}
