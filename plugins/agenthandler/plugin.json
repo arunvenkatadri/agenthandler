@@ -10,7 +10,13 @@
   "homepage": "https://github.com/arunvenkatadri/agenthandler",
   "repository": "https://github.com/arunvenkatadri/agenthandler",
   "license": "Apache-2.0",
-  "keywords": ["agents", "guardrails", "supervision", "governance", "observability"],
+  "keywords": [
+    "agents",
+    "guardrails",
+    "supervision",
+    "governance",
+    "observability"
+  ],
   "extensions": {
     "com.openai": {
       "interface": {
@@ -29,6 +35,8 @@
         ],
         "websiteURL": "https://github.com/arunvenkatadri/agenthandler",
         "supportURL": "https://github.com/arunvenkatadri/agenthandler/issues",
+        "privacyPolicyURL": "https://github.com/arunvenkatadri/agenthandler/blob/main/PRIVACY.md",
+        "termsOfServiceURL": "https://github.com/arunvenkatadri/agenthandler/blob/main/TERMS.md",
         "defaultPrompt": "Add supervision to my agent's tool calls with agenthandler",
         "brandColor": "#C8912A",
         "brandColorDark": "#E8B23A",
