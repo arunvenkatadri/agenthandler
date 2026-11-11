@@ -41,6 +41,14 @@ AgentHandler takes a different approach. **You define skills and agents declarat
 pip install agenthandler
 ```
 
+Using Claude Code or Codex? Install the skill so your coding agent knows the API:
+
+```
+/plugin install agenthandler --marketplace arunvenkatadri/agenthandler
+```
+
+For Codex, copy `.agents/skills/agenthandler/` into your repo or `~/.agents/skills/`.
+
 ## Quick start
 
 ```python
