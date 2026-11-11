@@ -10,9 +10,9 @@ Usage:
     router = ModelRouter(
         api_key="sk-ant-...",
         rules=[
-            RoutingRule(name="simple", match_default=True, model="claude-haiku-4-5"),
             RoutingRule(name="complex", keywords=["analyze", "compare"], model="claude-sonnet-4-6"),
             RoutingRule(name="critical", keywords=["audit", "legal"], model="claude-opus-4-6"),
+            RoutingRule(name="simple", match_default=True, model="claude-haiku-4-5"),
         ],
         supervisor=sv,
     )
@@ -142,7 +142,7 @@ class ModelRouter:
         match_default: bool = False,
         escalation: str = "",
     ) -> "ModelRouter":
-        """Add a routing rule. Inserts before the last rule (to keep default last)."""
+        """Add a rule before the first default, preserving specific-rule priority."""
         rule = RoutingRule(
             name=name,
             model=model,
@@ -151,10 +151,14 @@ class ModelRouter:
             match_default=match_default,
             escalation=escalation,
         )
-        if len(self._rules) > 0:
-            self._rules.insert(len(self._rules) - 1, rule)
-        else:
+        if match_default:
             self._rules.append(rule)
+        else:
+            index = next(
+                (i for i, existing in enumerate(self._rules) if existing.match_default),
+                len(self._rules),
+            )
+            self._rules.insert(index, rule)
         return self
 
     def route(self, prompt: str) -> RoutingRule:
@@ -174,11 +178,14 @@ class ModelRouter:
             ) from e
 
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
-        response = await client.messages.create(
-            model=model,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        finally:
+            await client.close()
         text = response.content[0].text if response.content else ""
         return {
             "text": text,

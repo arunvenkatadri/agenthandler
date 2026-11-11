@@ -392,7 +392,7 @@ class TestA2ASupervisedEndpoint:
         mgr.stop(sid)
 
     @pytest.mark.asyncio
-    async def test_handle_cancel(self):
+    async def test_cannot_cancel_completed_task(self):
         store = MemoryStore()
         mgr = SessionManager(store)
         sid = mgr.start("test-agent", POLICY)
@@ -415,7 +415,7 @@ class TestA2ASupervisedEndpoint:
             }
         )
 
-        assert response["result"]["state"] == "canceled"
+        assert response["error"]["code"] == -32002
 
         get_response = await endpoint.handle_get(
             {
@@ -424,7 +424,7 @@ class TestA2ASupervisedEndpoint:
                 "params": {"id": "task-99"},
             }
         )
-        assert get_response["result"]["state"] == "canceled"
+        assert get_response["result"]["state"] == "completed"
         mgr.stop(sid)
 
     @pytest.mark.asyncio

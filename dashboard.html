@@ -1317,9 +1317,13 @@
 <script>
 // -- Helpers --
 function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s == null ? '' : String(s);
-  return d.innerHTML;
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+// Encode a JavaScript string argument, then encode its HTML attribute context.
+function jsArg(s) {
+  return esc(JSON.stringify(String(s == null ? '' : s)));
 }
 function sysCard(value, label) {
   return '<div class="sys-card"><div class="sys-value">' + esc(String(value)) + '</div><div class="sys-label">' + esc(label) + '</div></div>';
@@ -1806,13 +1810,13 @@ function renderAgentCard(agent, showActions) {
 
   // Card actions
   html += '<div class="card-actions">';
-  html += '<button class="btn-secondary" onclick="openChatPanel(\'' + esc(agent.name) + '\')">Chat</button>';
+  html += '<button class="btn-secondary" onclick="openChatPanel(' + jsArg(agent.name) + ')">Chat</button>';
   if (showActions) {
     if (agent._live) {
       // Live agent — allow editing definition + API-backed controls
-      html += '<button class="btn-secondary" onclick="editLiveAgent(\'' + esc(agent._session_id) + '\')">Edit</button>';
+      html += '<button class="btn-secondary" onclick="editLiveAgent(' + jsArg(agent._session_id) + ')">Edit</button>';
       if (st === 'stopped' || st === 'failed') {
-        html += '<button class="btn-secondary" onclick="liveAgentAction(\'' + esc(agent._session_id) + '\',\'restart\')">Restart</button>';
+        html += '<button class="btn-secondary" onclick="liveAgentAction(' + jsArg(agent._session_id) + ',\'restart\')">Restart</button>';
       }
     } else {
       html += '<button class="btn-secondary" onclick="editAgent(' + idx + ')">Edit</button>';
@@ -3939,7 +3943,7 @@ function renderSessions() {
     return;
   }
   grid.innerHTML = sessionsData.map((s, i) => {
-    let html = '<div class="card" style="cursor:pointer" onclick="showSessionDetail(\'' + esc(s.session_id) + '\')">';
+    let html = '<div class="card" style="cursor:pointer" onclick="showSessionDetail(' + jsArg(s.session_id) + ')">';
     html += '<div class="card-header">';
     html += '<div class="card-header-left">';
     html += '<span class="dot ' + sessionStatusDot(s.status) + '"></span>';
@@ -3961,13 +3965,13 @@ function renderSessions() {
     // Controls
     html += '<div class="card-actions">';
     if (s.status === 'running') {
-      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'pause\')">Pause</button>';
-      html += '<button class="btn-danger" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'stop\')">Stop</button>';
+      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionAction(' + jsArg(s.session_id) + ',\'pause\')">Pause</button>';
+      html += '<button class="btn-danger" onclick="event.stopPropagation();sessionAction(' + jsArg(s.session_id) + ',\'stop\')">Stop</button>';
     } else if (s.status === 'paused') {
-      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'resume\')">Resume</button>';
-      html += '<button class="btn-danger" onclick="event.stopPropagation();sessionAction(\'' + s.session_id + '\',\'stop\')">Stop</button>';
+      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionAction(' + jsArg(s.session_id) + ',\'resume\')">Resume</button>';
+      html += '<button class="btn-danger" onclick="event.stopPropagation();sessionAction(' + jsArg(s.session_id) + ',\'stop\')">Stop</button>';
     } else if (s.status === 'stopped' || s.status === 'failed') {
-      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionRestart(\'' + s.session_id + '\')">Restart</button>';
+      html += '<button class="btn-secondary" onclick="event.stopPropagation();sessionRestart(' + jsArg(s.session_id) + ')">Restart</button>';
     }
     html += '</div>';
     html += '</div>';
@@ -4039,8 +4043,8 @@ function showSessionDetail(sessionId) {
         html += '<div style="font-size:0.75rem; color:var(--muted); margin:0.2rem 0;">Args: ' + esc(JSON.stringify(a.tool_args)) + '</div>';
         html += '<div style="font-size:0.72rem; color:var(--muted);">Requested: ' + esc(a.created_at) + '</div>';
         html += '<div class="card-actions" style="margin-top:0.3rem;">';
-        html += '<button class="btn-secondary" style="background:var(--green); color:#fff; border-color:var(--green);" onclick="approvalAction(\'' + esc(detail.session_id) + '\',\'' + esc(a.approval_id) + '\',\'approve\')">Approve</button>';
-        html += '<button class="btn-danger" onclick="approvalAction(\'' + esc(detail.session_id) + '\',\'' + esc(a.approval_id) + '\',\'deny\')">Deny</button>';
+        html += '<button class="btn-secondary" style="background:var(--green); color:#fff; border-color:var(--green);" onclick="approvalAction(' + jsArg(detail.session_id) + ',' + jsArg(a.approval_id) + ',\'approve\')">Approve</button>';
+        html += '<button class="btn-danger" onclick="approvalAction(' + jsArg(detail.session_id) + ',' + jsArg(a.approval_id) + ',\'deny\')">Deny</button>';
         html += '</div></div>';
       });
     }
@@ -4123,11 +4127,11 @@ function renderRoutingRules() {
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
         <div style="display:flex; align-items:center; gap:0.5rem;">
           <span style="font-size:0.75rem; color:var(--muted);">#${i+1}</span>
-          <input class="form-input" value="${rule.name}" onchange="routingRules[${i}].name=this.value"
+          <input class="form-input" value="${esc(rule.name)}" onchange="routingRules[${i}].name=this.value"
                  style="width:180px; font-size:0.82rem; font-weight:600;">
           <span class="badge ${rule.route==='cloud'?'badge-blue':rule.route==='local'?'badge-green':'badge-yellow'}"
                 style="font-size:0.72rem; padding:0.15rem 0.5rem; border-radius:4px;">
-            ${rule.route.toUpperCase()}
+            ${esc(rule.route.toUpperCase())}
           </span>
         </div>
         <div style="display:flex; gap:0.35rem;">
@@ -4174,7 +4178,7 @@ function renderRoutingRules() {
         <label style="font-size:0.75rem; color:var(--muted);">
           Keywords (comma-sep)
           <input class="form-input" style="width:100%; margin-top:0.15rem;"
-                 value="${(rule.match.keywords_any||[]).join(', ')}"
+                 value="${esc((rule.match.keywords_any||[]).join(', '))}"
                  onchange="routingRules[${i}].match.keywords_any=this.value.split(',').map(s=>s.trim()).filter(Boolean);">
         </label>
       </div>
@@ -4182,7 +4186,7 @@ function renderRoutingRules() {
       <label style="font-size:0.75rem; color:var(--muted); margin-top:0.5rem; display:block;">
         Workflow Name
         <input class="form-input" style="width:200px; margin-top:0.15rem;"
-               value="${rule.workflow||''}" onchange="routingRules[${i}].workflow=this.value;">
+               value="${esc(rule.workflow||'')}" onchange="routingRules[${i}].workflow=this.value;">
       </label>` : ''}
     </div>
   `).join('');
@@ -4229,7 +4233,7 @@ function buildRoutingYaml() {
   lines.push('');
   lines.push('rules:');
   for (const rule of routingRules) {
-    lines.push(`- name: ${rule.name}`);
+    lines.push(`- name: ${esc(rule.name)}`);
     const kw = rule.match.keywords_any || [];
     if (kw.length > 0) {
       lines.push('  match:');
@@ -4299,8 +4303,8 @@ function runRoutingTest() {
 
   if (matched) {
     const color = matched.route === 'cloud' ? 'var(--accent)' : matched.route === 'local' ? 'var(--green)' : 'var(--yellow)';
-    resultEl.innerHTML = `<span style="color:${color}; font-weight:600;">${matched.route.toUpperCase()}</span> &rarr; <strong>${matched.model || 'default'}</strong> &mdash; rule "<strong>${matched.name}</strong>"` +
-      (matched.escalation ? ` (escalation: ${matched.escalation})` : '');
+    resultEl.innerHTML = `<span style="color:${color}; font-weight:600;">${esc(matched.route.toUpperCase())}</span> &rarr; <strong>${esc(matched.model || 'default')}</strong> &mdash; rule "<strong>${esc(matched.name)}</strong>"` +
+      (matched.escalation ? ` (escalation: ${esc(matched.escalation)})` : '');
   } else {
     resultEl.innerHTML = '<span style="color:var(--red);">No rule matched</span> &mdash; query would be rejected.';
   }

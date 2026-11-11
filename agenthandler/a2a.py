@@ -18,6 +18,7 @@ To make your agent discoverable:
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from dataclasses import dataclass, field
@@ -467,6 +468,7 @@ class A2ASupervisedEndpoint:
         self._session_id = session_id
         self._tool_router = tool_router
         self._tasks: Dict[str, A2ATask] = {}
+        self._running_tasks: Dict[str, asyncio.Task[Any]] = {}
         self._auth_token = auth_token
 
         sv = manager.get_supervisor(session_id)
@@ -501,6 +503,13 @@ class A2ASupervisedEndpoint:
         skill = params.get("skill", "")
         task_input = params.get("input")
 
+        if task_id in self._tasks:
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32602, "message": "Task ID already exists"},
+            }
+
         task = A2ATask(
             id=task_id,
             state=TaskState.WORKING,
@@ -516,11 +525,25 @@ class A2ASupervisedEndpoint:
             tool_fn = self._tool_router(skill)
 
         if tool_fn is not None:
-            result = await sv.call(
-                skill,
-                tool_fn,
-                **(task_input if isinstance(task_input, dict) else {"input": task_input}),
+            execution = asyncio.create_task(
+                sv.call(
+                    skill,
+                    tool_fn,
+                    **(task_input if isinstance(task_input, dict) else {"input": task_input}),
+                )
             )
+            self._running_tasks[task_id] = execution
+            try:
+                result = await execution
+            except asyncio.CancelledError:
+                if task.state != TaskState.CANCELED:
+                    task.state = TaskState.CANCELED
+                    raise
+                return {"jsonrpc": "2.0", "id": rpc_id, "result": task.to_dict()}
+            finally:
+                self._running_tasks.pop(task_id, None)
+            if task.state == TaskState.CANCELED:
+                return {"jsonrpc": "2.0", "id": rpc_id, "result": task.to_dict()}
             if result.succeeded:
                 task.state = TaskState.COMPLETED
                 task.output = result.output
@@ -577,7 +600,16 @@ class A2ASupervisedEndpoint:
                 },
             }
 
+        if task.state in (TaskState.COMPLETED, TaskState.FAILED):
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32002, "message": "Task is already terminal"},
+            }
         task.state = TaskState.CANCELED
+        execution = self._running_tasks.get(task_id)
+        if execution is not None:
+            execution.cancel()
         return {
             "jsonrpc": "2.0",
             "id": rpc_id,
@@ -598,7 +630,7 @@ class A2ASupervisedEndpoint:
         if not auth_header.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing authentication")
         provided = auth_header[len("Bearer ") :]
-        if not secrets.compare_digest(provided, self._auth_token):
+        if not secrets.compare_digest(provided.encode(), self._auth_token.encode()):
             raise HTTPException(status_code=401, detail="Invalid authentication token")
 
     def router(self) -> Any:
