@@ -18,12 +18,20 @@
         "shortDescription": "Guardrails for agent tools",
         "longDescription": "AgentHandler is the governance layer for AI agents. It wraps tool calls with timeouts, token and dollar budgets, circuit breakers, guardrails and audit logging, so one bad tool call cannot drain a budget or loop forever.\n\nThis skill teaches the agent the library's API and its sharp edges: how Supervisor and Policy fit together, why record_iteration() and record_tokens() are explicit, the two different error styles (tool calls return a result, budget checks raise), how the human approval flow is wired and the two settings it silently requires, and the delivery semantics of each stream connector.\n\nAgentHandler works alongside any framework — OpenAI Agents SDK, LangChain, CrewAI, or a hand-written loop — because it supervises the tool calls your loop makes rather than replacing the loop.",
         "developerName": "arunvenkatadri",
-        "category": "developer-tools",
-        "capabilities": [],
+        "category": "Developer Tools",
+        "capabilities": [
+          "Caps an agent's iterations, tokens and dollar spend per session",
+          "Gates dangerous tool calls behind human approval",
+          "Trips circuit breakers on tools that keep failing",
+          "Enforces per-tool timeouts",
+          "Writes a replayable audit log of every tool call",
+          "Subscribes an agent to a Kafka topic under supervision"
+        ],
         "websiteURL": "https://github.com/arunvenkatadri/agenthandler",
         "supportURL": "https://github.com/arunvenkatadri/agenthandler/issues",
         "defaultPrompt": "Add supervision to my agent's tool calls with agenthandler",
-        "brandColor": "#E8B23A",
+        "brandColor": "#C8912A",
+        "brandColorDark": "#E8B23A",
         "composerIcon": "./assets/icon.png",
         "logo": "./assets/icon.png"
       }
