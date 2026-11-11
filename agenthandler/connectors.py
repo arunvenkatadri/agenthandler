@@ -25,10 +25,13 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sqlite3
+import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # Regex patterns for stripping SQL comments before safety checks
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -37,6 +40,7 @@ _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 # DML / DDL keywords that must never appear in read-only queries
 _WRITE_KEYWORDS = frozenset(
     {
+        "INTO",
         "INSERT",
         "UPDATE",
         "DELETE",
@@ -119,6 +123,9 @@ class SqlConnector:
         allow_write: bool = False,
         max_rows: int = 1000,
     ):
+        if isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0:
+            raise ValueError("max_rows must be a positive integer")
+        self._lock = threading.RLock()
         self._conn_str = connection_string
         self._allow_write = allow_write
         self._max_rows = max_rows
@@ -133,20 +140,27 @@ class SqlConnector:
             path = self._conn_str[len("sqlite:///") :]
             if not self._allow_write:
                 # Use URI mode with ?mode=ro for defense-in-depth read-only
-                uri = f"file:{path}?mode=ro"
-                self._conn = sqlite3.connect(uri, uri=True)
+                uri = Path(path).resolve().as_uri() + "?mode=ro"
+                self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
             else:
-                self._conn = sqlite3.connect(path)
+                self._conn = sqlite3.connect(path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         elif self._conn_str == "sqlite://:memory:":
-            self._conn = sqlite3.connect(":memory:")
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         elif self._conn_str.startswith("postgresql://"):
             try:
                 import psycopg2
                 import psycopg2.extras
 
-                self._conn = psycopg2.connect(self._conn_str)
+                conn = psycopg2.connect(self._conn_str)
+                try:
+                    if not self._allow_write:
+                        conn.set_session(readonly=True)
+                except Exception:
+                    conn.close()
+                    raise
+                self._conn = conn
             except ImportError as e:
                 raise ImportError(
                     "psycopg2 required for PostgreSQL: pip install psycopg2-binary"
@@ -155,18 +169,15 @@ class SqlConnector:
             try:
                 import mysql.connector  # type: ignore[import-not-found]
 
-                # Parse mysql://user:pass@host/db
-                parsed = re.match(r"mysql://([^:]+):([^@]+)@([^/]+)/(.+)", self._conn_str)
-                if not parsed:
-                    raise ValueError(
-                        f"Invalid MySQL connection string: "
-                        f"{_redact_connection_string(self._conn_str)}"
-                    )
+                parsed = urlparse(self._conn_str)
+                if not parsed.hostname or not parsed.path.strip("/"):
+                    raise ValueError("Invalid MySQL connection string")
                 self._conn = mysql.connector.connect(
-                    user=parsed.group(1),
-                    password=parsed.group(2),
-                    host=parsed.group(3),
-                    database=parsed.group(4),
+                    user=unquote(parsed.username or ""),
+                    password=unquote(parsed.password or ""),
+                    host=parsed.hostname,
+                    port=parsed.port or 3306,
+                    database=unquote(parsed.path.lstrip("/")),
                 )
             except ImportError as e:
                 raise ImportError(
@@ -192,7 +203,14 @@ class SqlConnector:
             return
 
         # Strip comments so they cannot be used to hide write operations
-        cleaned = _strip_sql_comments(sql)
+        if "/*!" in sql:
+            raise PermissionError("Executable SQL comments are not allowed in read-only mode.")
+        cleaned = re.sub(
+            r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|--[^\n]*|/\*.*?\*/",
+            " ",
+            sql,
+            flags=re.DOTALL,
+        )
         normalized = cleaned.strip().upper()
 
         if not normalized:
@@ -206,20 +224,15 @@ class SqlConnector:
 
         # Allowlist: statement must start with SELECT or WITH
         first_word = normalized.split()[0] if normalized.split() else ""
-        if first_word == "SELECT":
-            return  # simple SELECT — allowed
-
-        if first_word == "WITH":
-            # WITH (CTE) is allowed only if the body contains no DML
-            # Tokenise the whole statement and check for write keywords
+        if first_word in {"SELECT", "WITH"}:
             tokens = set(re.findall(r"[A-Z_]+", normalized))
             found = tokens & _WRITE_KEYWORDS
             if found:
                 raise PermissionError(
-                    f"Write keyword(s) {', '.join(sorted(found))} found inside "
-                    f"WITH/CTE. Set allow_write=True to enable."
+                    f"Write keyword(s) {', '.join(sorted(found))} are not allowed "
+                    "in read-only mode. Set allow_write=True to enable."
                 )
-            return  # CTE with only SELECTs — allowed
+            return
 
         # Anything else (INSERT, UPDATE, DELETE, DROP, PRAGMA, …) is blocked
         raise PermissionError(
@@ -244,41 +257,49 @@ class SqlConnector:
         Returns:
             Dict with "rows" (list of dicts), "row_count", and "columns".
         """
-        query_str = sql or input
+        return await asyncio.to_thread(self._query, sql or input, params)
+
+    def _query(self, query_str: str, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        with self._lock:
+            return self._query_locked(query_str, params)
+
+    def _query_locked(self, query_str: str, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not query_str:
             return {"rows": [], "row_count": 0, "columns": []}
 
         self._check_write(query_str)
         conn = self._connect()
-        cursor = conn.cursor()
-
         try:
-            # Always use parameterized execution — pass an empty dict when
-            # no params are provided so the driver never interprets raw SQL
-            # format-specifiers (e.g. ``%s``, ``?``) as literal text.
-            cursor.execute(query_str, params or {})
-
-            # For SELECT queries, fetch results
-            if cursor.description:
-                columns = [desc[0] for desc in cursor.description]
-                rows_raw = cursor.fetchmany(self._max_rows)
-                rows = [dict(zip(columns, row)) for row in rows_raw]
-                return {
-                    "rows": rows,
-                    "row_count": len(rows),
-                    "columns": columns,
-                }
+            if self._conn_str.startswith("mysql://"):
+                if not self._allow_write:
+                    conn.start_transaction(readonly=True)
+                cursor = conn.cursor(buffered=True)
             else:
-                # Write operation (INSERT/UPDATE/DELETE)
-                conn.commit()
-                return {
-                    "rows": [],
-                    "row_count": cursor.rowcount,
-                    "columns": [],
-                    "affected_rows": cursor.rowcount,
-                }
-        finally:
-            cursor.close()
+                cursor = conn.cursor()
+            try:
+                if params is None:
+                    cursor.execute(query_str)
+                else:
+                    cursor.execute(query_str, params)
+                if cursor.description:
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = [dict(zip(columns, row)) for row in cursor.fetchmany(self._max_rows)]
+                    result = {"rows": rows, "row_count": len(rows), "columns": columns}
+                else:
+                    result = {
+                        "rows": [],
+                        "row_count": cursor.rowcount,
+                        "columns": [],
+                        "affected_rows": cursor.rowcount,
+                    }
+            finally:
+                cursor.close()
+            # RETURNING also has a result set, but still needs a commit.
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
 
     async def execute(
         self,
@@ -301,84 +322,94 @@ class SqlConnector:
         Returns:
             {"tables": [{"name": "...", "columns": [{"name": "...", "type": "..."}]}]}
         """
+        return await asyncio.to_thread(self._discover_schema)
+
+    def _discover_schema(self) -> Dict[str, Any]:
+        with self._lock:
+            try:
+                return self._discover_schema_locked()
+            finally:
+                if self._conn is not None:
+                    self._conn.rollback()
+
+    def _discover_schema_locked(self) -> Dict[str, Any]:
         conn = self._connect()
         tables: List[Dict[str, Any]] = []
 
-        if self._conn_str.startswith("sqlite"):
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-            table_names = [row[0] for row in cursor.fetchall()]
-            for tname in table_names:
-                if tname.startswith("sqlite_"):
-                    continue
-                # Validate table name to prevent SQL injection via
-                # crafted table names stored in sqlite_master.
-                _validate_table_name(tname)
-                cursor.execute(f"PRAGMA table_info([{tname}])")
-                cols = [
-                    {
-                        "name": row[1],
-                        "type": row[2],
-                        "nullable": not row[3],
-                        "pk": bool(row[5]),
-                    }
-                    for row in cursor.fetchall()
-                ]
-                # Sample a few rows for context
-                cursor.execute(f"SELECT COUNT(*) FROM [{tname}]")
-                row_count = cursor.fetchone()[0]
-                tables.append(
-                    {
-                        "name": tname,
-                        "columns": cols,
-                        "row_count": row_count,
-                    }
-                )
-            cursor.close()
+        cursor = conn.cursor()
+        try:
+            if self._conn_str.startswith("sqlite"):
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                table_names = [row[0] for row in cursor.fetchall()]
+                for tname in table_names:
+                    if tname.startswith("sqlite_"):
+                        continue
+                    # Validate table name to prevent SQL injection via
+                    # crafted table names stored in sqlite_master.
+                    _validate_table_name(tname)
+                    cursor.execute(f"PRAGMA table_info([{tname}])")
+                    cols = [
+                        {
+                            "name": row[1],
+                            "type": row[2],
+                            "nullable": not row[3],
+                            "pk": bool(row[5]),
+                        }
+                        for row in cursor.fetchall()
+                    ]
+                    # Sample a few rows for context
+                    cursor.execute(f"SELECT COUNT(*) FROM [{tname}]")
+                    row_count = cursor.fetchone()[0]
+                    tables.append(
+                        {
+                            "name": tname,
+                            "columns": cols,
+                            "row_count": row_count,
+                        }
+                    )
 
-        elif self._conn_str.startswith("postgresql"):
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public' ORDER BY table_name"
-            )
-            table_names = [row[0] for row in cursor.fetchall()]
-            for tname in table_names:
+            elif self._conn_str.startswith("postgresql"):
                 cursor.execute(
-                    "SELECT column_name, data_type, is_nullable, "
-                    "column_default FROM information_schema.columns "
-                    "WHERE table_name = %s ORDER BY ordinal_position",
-                    (tname,),
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' ORDER BY table_name"
                 )
-                cols = [
-                    {
-                        "name": row[0],
-                        "type": row[1],
-                        "nullable": row[2] == "YES",
-                        "default": row[3],
-                    }
-                    for row in cursor.fetchall()
-                ]
-                tables.append({"name": tname, "columns": cols})
-            cursor.close()
+                table_names = [row[0] for row in cursor.fetchall()]
+                for tname in table_names:
+                    cursor.execute(
+                        "SELECT column_name, data_type, is_nullable, "
+                        "column_default FROM information_schema.columns "
+                        "WHERE table_name = %s ORDER BY ordinal_position",
+                        (tname,),
+                    )
+                    cols = [
+                        {
+                            "name": row[0],
+                            "type": row[1],
+                            "nullable": row[2] == "YES",
+                            "default": row[3],
+                        }
+                        for row in cursor.fetchall()
+                    ]
+                    tables.append({"name": tname, "columns": cols})
 
-        elif self._conn_str.startswith("mysql"):
-            cursor = conn.cursor()
-            cursor.execute("SHOW TABLES")
-            table_names = [row[0] for row in cursor.fetchall()]
-            for tname in table_names:
-                _validate_table_name(tname)
-                cursor.execute(f"DESCRIBE `{tname}`")
-                cols = [
-                    {
-                        "name": row[0],
-                        "type": row[1],
-                        "nullable": row[2] == "YES",
-                        "pk": row[3] == "PRI",
-                    }
-                    for row in cursor.fetchall()
-                ]
-                tables.append({"name": tname, "columns": cols})
+            elif self._conn_str.startswith("mysql"):
+                cursor.execute("SHOW TABLES")
+                table_names = [row[0] for row in cursor.fetchall()]
+                for tname in table_names:
+                    _validate_table_name(tname)
+                    cursor.execute(f"DESCRIBE `{tname}`")
+                    cols = [
+                        {
+                            "name": row[0],
+                            "type": row[1],
+                            "nullable": row[2] == "YES",
+                            "pk": row[3] == "PRI",
+                        }
+                        for row in cursor.fetchall()
+                    ]
+                    tables.append({"name": tname, "columns": cols})
+
+        finally:
             cursor.close()
 
         return {"tables": tables}
@@ -410,9 +441,10 @@ class SqlConnector:
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
 
 class MongoConnector:
@@ -434,6 +466,8 @@ class MongoConnector:
         allow_write: bool = False,
         max_docs: int = 1000,
     ):
+        if isinstance(max_docs, bool) or not isinstance(max_docs, int) or max_docs <= 0:
+            raise ValueError("max_docs must be a positive integer")
         self._uri = uri
         self._database = database
         self._allow_write = allow_write
@@ -476,6 +510,20 @@ class MongoConnector:
         Returns:
             Dict with "documents" (list of dicts) and "count".
         """
+        return await asyncio.to_thread(self._find, collection, filter, projection, sort, limit)
+
+    def _find(
+        self,
+        collection: str,
+        filter: Optional[Dict[str, Any]],
+        projection: Optional[Dict[str, Any]],
+        sort: Optional[List[Any]],
+        limit: Optional[int],
+    ) -> Dict[str, Any]:
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError("limit must be a non-negative integer")
         db = self._connect()
         coll = db[collection]
         cursor = coll.find(
@@ -505,6 +553,9 @@ class MongoConnector:
 
         Raises PermissionError if allow_write is False.
         """
+        return await asyncio.to_thread(self._insert, collection, documents)
+
+    def _insert(self, collection: str, documents: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
         if not self._allow_write:
             raise PermissionError("Write operation blocked. Set allow_write=True to enable.")
         db = self._connect()
@@ -520,6 +571,9 @@ class MongoConnector:
 
         Samples a few documents from each collection to infer the schema.
         """
+        return await asyncio.to_thread(self._discover_schema)
+
+    def _discover_schema(self) -> Dict[str, Any]:
         db = self._connect()
         collections = []
         for name in db.list_collection_names():

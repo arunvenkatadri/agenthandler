@@ -28,9 +28,10 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, Union
 
+from .errors import AgentHandlerError
 from .session import SessionManager
 from .supervisor import SupervisedResult
 
@@ -420,13 +421,19 @@ class Pipeline:
             session_context = cp.payload if cp else {}
 
         for i, node in enumerate(self._nodes):
-            sv.record_iteration()
+            try:
+                sv.record_iteration()
+            except AgentHandlerError as exc:
+                pipeline_result.stopped_at = node.name
+                pipeline_result.error = str(exc)
+                if not self._reuse_session_id:
+                    self._manager.stop(sid)
+                return pipeline_result
 
             if isinstance(node, Step):
                 # Inject context for LLM decision steps
                 if node.__dict__.get("_include_context", False):
-                    node.kwargs = dict(node.kwargs)
-                    node.kwargs["_context"] = session_context
+                    node = replace(node, kwargs={**node.kwargs, "_context": session_context})
 
                 result, step_result = await self._run_step(sv, node, previous_output, i)
                 pipeline_result.steps.append(step_result)
@@ -440,7 +447,8 @@ class Pipeline:
                         pipeline_result.error = f"Step '{node.name}' awaiting approval: {aid}"
                     else:
                         pipeline_result.error = f"Step '{node.name}' failed: {error_kind}"
-                        self._manager.stop(sid)
+                        if not self._reuse_session_id:
+                            self._manager.stop(sid)
                     return pipeline_result
 
                 previous_output = result.output
@@ -452,7 +460,8 @@ class Pipeline:
                 except Exception as e:
                     pipeline_result.stopped_at = node.name
                     pipeline_result.error = f"Condition '{node.name}' predicate failed: {e}"
-                    self._manager.stop(sid)
+                    if not self._reuse_session_id:
+                        self._manager.stop(sid)
                     return pipeline_result
 
                 chosen = node.then_step if take_then else node.else_step
@@ -471,7 +480,11 @@ class Pipeline:
                     pipeline_result.stopped_at = chosen.name
                     error_kind = result.error.kind if result.error else "unknown"
                     pipeline_result.error = f"Step '{chosen.name}' ({branch}) failed: {error_kind}"
-                    self._manager.stop(sid)
+                    if error_kind == "approval_pending":
+                        aid = result.error.details.get("approval_id", "") if result.error else ""
+                        pipeline_result.error = f"Step '{chosen.name}' awaiting approval: {aid}"
+                    elif not self._reuse_session_id:
+                        self._manager.stop(sid)
                     return pipeline_result
 
                 previous_output = result.output

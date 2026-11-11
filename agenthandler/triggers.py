@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -79,43 +80,44 @@ def _cron_matches(cron_expr: str, dt: datetime) -> bool:
     if len(parts) != 5:
         raise ValueError(f"Invalid cron expression: {cron_expr} (need 5 fields)")
 
-    fields = [dt.minute, dt.hour, dt.day, dt.month, dt.weekday()]
-    ranges = [
-        (0, 59),  # minute
-        (0, 23),  # hour
-        (1, 31),  # day of month
-        (1, 12),  # month
-        (0, 6),  # day of week (0=Monday)
-    ]
+    ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+    # Parse every field before matching so invalid later fields are never hidden.
+    allowed = [_cron_values(part, lo, hi) for part, (lo, hi) in zip(parts, ranges)]
+    day = dt.day in allowed[2]
+    weekday = (dt.weekday() + 1) % 7
+    dow = weekday in allowed[4] or (weekday == 0 and 7 in allowed[4])
+    day_matches = (
+        (day and dow) if parts[2].startswith("*") or parts[4].startswith("*") else (day or dow)
+    )
+    return (
+        dt.minute in allowed[0] and dt.hour in allowed[1] and dt.month in allowed[3] and day_matches
+    )
 
-    for part, val, (lo, hi) in zip(parts, fields, ranges):
-        if not _cron_field_matches(part, val, lo, hi):
-            return False
-    return True
+
+def _cron_values(expression: str, lo: int, hi: int) -> set[int]:
+    values: set[int] = set()
+    for item in expression.split(","):
+        base, sep, step_text = item.partition("/")
+        step = int(step_text) if sep else 1
+        if step <= 0:
+            raise ValueError("Cron step must be positive")
+        if base == "*":
+            start, end = lo, hi
+        elif "-" in base:
+            left, right = base.split("-", 1)
+            start, end = int(left), int(right)
+        else:
+            start = int(base)
+            end = hi if sep else start
+        if not lo <= start <= end <= hi:
+            raise ValueError(f"Cron field outside {lo}..{hi}: {expression}")
+        values.update(range(start, end + 1, step))
+    return values
 
 
 def _cron_field_matches(field_expr: str, value: int, lo: int, hi: int) -> bool:
-    """Check if a single cron field matches a value."""
-    if field_expr == "*":
-        return True
-
-    for item in field_expr.split(","):
-        # Handle */N
-        if item.startswith("*/"):
-            step = int(item[2:])
-            if value % step == 0:
-                return True
-        # Handle N-M
-        elif "-" in item:
-            start, end = item.split("-", 1)
-            if int(start) <= value <= int(end):
-                return True
-        # Handle plain N
-        else:
-            if int(item) == value:
-                return True
-
-    return False
+    """Validate a cron field and check membership."""
+    return value in _cron_values(field_expr, lo, hi)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +193,7 @@ class Scheduler:
             seconds/minutes/hours: Interval (combined).
         """
         total = seconds + minutes * 60 + hours * 3600
-        if total <= 0:
+        if not math.isfinite(total) or total <= 0:
             raise ValueError("Interval must be > 0")
         with self._lock:
             self._intervals[name] = IntervalEntry(name=name, fn=fn, seconds=total)
@@ -236,6 +238,8 @@ class Scheduler:
             condition: Function that takes query result dict and returns bool.
             poll_seconds: How often to poll.
         """
+        if not math.isfinite(poll_seconds) or poll_seconds <= 0:
+            raise ValueError("poll_seconds must be > 0")
         with self._lock:
             self._db_watches[name] = DbWatchEntry(
                 name=name,
@@ -312,36 +316,64 @@ class Scheduler:
     def history(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get recent trigger firing history."""
         with self._lock:
-            return [r.to_dict() for r in self._history[-limit:]]
+            return [r.to_dict() for r in self._history[-limit:]] if limit > 0 else []
 
     def start(self) -> None:
-        """Start the scheduler in a background thread."""
-        if self._running:
-            return
-        self._running = True
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name="agenthandler-scheduler"
-        )
-        self._thread.start()
+        """Start one background scheduler thread."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._running = True
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(
+                target=self._run_loop, daemon=True, name="agenthandler-scheduler"
+            )
+            self._thread.start()
 
     def stop(self) -> None:
-        """Stop the scheduler."""
-        self._running = False
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread:
-            self._thread.join(timeout=5)
-        self._thread = None
-        self._loop = None
+        """Cancel asynchronous work and wait up to five seconds for shutdown."""
+        with self._lock:
+            self._running = False
+            loop, thread = self._loop, self._thread
+        if loop is not None:
+
+            def cancel() -> None:
+                for task in asyncio.all_tasks(loop):
+                    task.cancel()
+
+            try:
+                loop.call_soon_threadsafe(cancel)
+            except RuntimeError:
+                pass  # Already closed by the worker.
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
 
     def _run_loop(self) -> None:
-        """Main scheduler loop."""
-        assert self._loop is not None
-        asyncio.set_event_loop(self._loop)
-        while self._running:
-            self._loop.run_until_complete(self._tick())
-            time.sleep(1)  # 1-second resolution
+        loop = self._loop
+        assert loop is not None
+        asyncio.set_event_loop(loop)
+
+        async def serve() -> None:
+            while self._running:
+                await self._tick()
+                await asyncio.sleep(1)
+
+        try:
+            loop.run_until_complete(serve())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+            with self._lock:
+                self._running = False
+                self._loop = None
+                self._thread = None
 
     async def _tick(self) -> None:
         """Check all triggers and fire any that are due."""
@@ -362,7 +394,7 @@ class Scheduler:
                 await self._fire(ie.name, "interval", ie.fn)
 
         # Cron triggers
-        current_minute = now_dt.hour * 60 + now_dt.minute
+        current_minute = int(now_dt.timestamp() // 60)
         for ce in crons:
             if not ce.enabled:
                 continue
@@ -441,10 +473,13 @@ class WebhookTrigger:
     ):
         self.name = name
         self.fn = fn
+        self.enabled = True
         self._history: List[TriggerRecord] = []
 
     async def fire(self, payload: Optional[Dict[str, Any]] = None) -> TriggerRecord:
         """Fire the trigger. Called by the REST endpoint handler."""
+        if not self.enabled:
+            raise PermissionError("Webhook is disabled")
         try:
             result = await self.fn()
             result_dict = None
@@ -465,7 +500,8 @@ class WebhookTrigger:
                 error=str(e),
             )
         self._history.append(record)
+        self._history = self._history[-1000:]
         return record
 
     def history(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return [r.to_dict() for r in self._history[-limit:]]
+        return [r.to_dict() for r in self._history[-limit:]] if limit > 0 else []
