@@ -506,13 +506,31 @@ Three streaming backends — install only what you need:
 
 | Connector | Install | Use for |
 |-----------|---------|---------|
-| `KafkaStreamConnector` | `pip install agenthandler[kafka]` | Self-hosted, enterprise, replay, consumer groups |
-| `KinesisStreamConnector` | `pip install agenthandler[kinesis]` | AWS-native event streams |
+| `KafkaStreamConnector` | `pip install agenthandler[kafka]` | Self-hosted, enterprise, replay, consumer groups. **Recommended for long-running agents.** |
 | `RedisStreamConnector` | `pip install agenthandler[redis]` | Simpler deployments, already-have-Redis |
+| `KinesisStreamConnector` | `pip install agenthandler[kinesis]` | AWS-native event streams. Live-tail only — see the caveat below. |
 
 Or install all three: `pip install agenthandler[streams]`
 
-All three use at-least-once delivery — messages are acknowledged only after the handler completes successfully. If the agent crashes mid-processing, the message is redelivered.
+**Delivery semantics.** A message is acknowledged only after its handler
+succeeds, and a failed handler is retried rather than skipped — the connector
+does not advance past a record it could not process.
+
+- **Kafka** commits the handled offset to the consumer group, so a restart
+  resumes where it left off.
+- **Redis Streams** acknowledges through the consumer group with `XACK`. A
+  handler that fails leaves the entry pending; nothing reclaims it
+  automatically yet, so recovery is manual.
+- **Kinesis** retries within the running process, but **keeps no durable
+  position**. It enumerates shards once at startup and resumes from
+  `shard_iterator_type` on restart — so a redeploy skips whatever arrived while
+  it was down, and a reshard is never noticed. Use it for live tailing, not for
+  anything that must not miss a record. Checkpointing and reshard discovery are
+  not implemented.
+
+A failed handler currently retries indefinitely with no attempt ceiling and no
+dead-letter queue, so a message that always fails will stall its partition
+([#4](https://github.com/arunvenkatadri/agenthandler/issues/4)).
 
 ## Triggers and scheduling
 
